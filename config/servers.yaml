@@ -1,0 +1,14 @@
+servers:
+  - name: mac-mini-1
+    host: 192.168.1.10
+    user: admin
+    smb_share: /Volumes/Share1
+    local_mount: /Volumes/Share1
+    script_dest: /Users/admin/scripts
+  
+  - name: mac-mini-2
+    host: 192.168.1.11
+    user: admin
+    smb_share: /Volumes/Share2
+    local_mount: /Volumes/Share2
+    script_dest: /Users/admin/scripts
