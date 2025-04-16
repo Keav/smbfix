@@ -3,11 +3,16 @@ import re
 import sys
 import subprocess
 import getpass
+import platform
 
 # Define invalid SMB characters
 PROBLEM_CHAR_REGEX = re.compile(r"[\x00-\x1F\x7F\uE000-\uF8FF\u0300-\u036F]")
 INVALID_CHARACTERS = re.compile(r'[\\/:*?"<>|+\[\]]')  # Keep existing invalid SMB characters
 stored_passwords = {}
+
+# Platform detection
+IS_MACOS = platform.system() == "Darwin"  
+IS_SYNOLOGY = os.path.exists("/etc/synoinfo.conf")
 
 # ------------------ FILE & FOLDER CLEANUP FUNCTIONS ------------------ #
 
@@ -33,7 +38,10 @@ def should_exclude(path):
     return "iPhoto Library" in path or ".abbu/" in path or path.lower().endswith(".abbu") or ".photoslibrary/" in path or path.lower().endswith(".photoslibrary")
 
 def is_locked(path):
-    """Check if a file or folder is locked."""
+    """Check if a file or folder is locked. Only applicable for macOS."""
+    if not IS_MACOS:
+        return False
+        
     result = subprocess.run(['find', path, '-flags', 'uchg'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return bool(result.stdout.strip())
 
@@ -56,6 +64,9 @@ def get_owner(path):
 
 def unlock_file(path, current_user, logged_in_user):
     """Unlock a file only if it is locked, using sudo -u logged_in_user."""
+    if not IS_MACOS:
+        return False  # Skip for non-macOS systems
+        
     if is_locked(path):
         print(f"\n🔓 Unlocking file: {path}")
         if logged_in_user not in stored_passwords:
@@ -75,6 +86,9 @@ def unlock_file(path, current_user, logged_in_user):
 
 def fix_ownership(path, current_user):
     """Fix ownership of a file or folder only if incorrect."""
+    if not IS_MACOS:  # Skip for non-macOS systems
+        return
+        
     try:
         if get_owner(path) != os.getuid():
             print(f"🛠️ Changing ownership: {path}")
@@ -85,6 +99,9 @@ def fix_ownership(path, current_user):
 
 def fix_permissions(path):
     """Ensure minimum permissions of 600 for files and 700 for folders."""
+    if not IS_MACOS:  # Skip for non-macOS systems
+        return
+        
     try:
         permissions = get_permissions(path)
         if permissions is not None:
@@ -126,9 +143,10 @@ def process_folder(folder, current_user, logged_in_user, rename_list):
     if should_exclude(folder):
         return
     
-    unlock_file(folder, current_user, logged_in_user)
-    fix_ownership(folder, current_user)
-    fix_permissions(folder)
+    if IS_MACOS:
+        unlock_file(folder, current_user, logged_in_user)
+        fix_ownership(folder, current_user)
+        fix_permissions(folder)
 
     folder = rename_if_needed(folder, rename_list)
 
@@ -150,16 +168,25 @@ def process_file(file, current_user, logged_in_user, rename_list):
     if should_exclude(file):
         return
 
-    unlock_file(file, current_user, logged_in_user)
-    fix_ownership(file, current_user)
-    fix_permissions(file)
+    if IS_MACOS:
+        unlock_file(file, current_user, logged_in_user)
+        fix_ownership(file, current_user)
+        fix_permissions(file)
 
     rename_if_needed(file, rename_list)
 
 def process_files_and_folders(root_dir):
     """Main function to process all files and folders, preview changes, and apply them in bulk."""
     current_user = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip()
-    logged_in_user = subprocess.run(["stat", "-f%Su", "/dev/console"], capture_output=True, text=True).stdout.strip()
+    logged_in_user = ""
+    
+    if IS_MACOS:
+        logged_in_user = subprocess.run(["stat", "-f%Su", "/dev/console"], capture_output=True, text=True).stdout.strip()
+        print(f"🍎 Running on macOS - Full fixes including permissions, ownership and locks")
+    elif IS_SYNOLOGY:
+        print(f"📦 Running on Synology NAS - Limited to filename fixes only")
+    else:
+        print(f"🖥️ Running on {platform.system()} - Limited to filename fixes only")
 
     print(f"\n🔍 Scanning for issues in: {root_dir}")
 
