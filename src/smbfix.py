@@ -25,8 +25,24 @@ def is_reserved_name(name):
 
 def clean_filename(entry):
     """Fix filename by replacing invalid characters, removing unnecessary spaces, and ensuring proper formatting."""
+    # Log problematic filenames when debugging is needed
+    original_entry = entry
+    
     if not entry:
+        print(f"⚠️ Warning: Empty filename detected, using 'unnamed_file' instead")
         return "unnamed_file"  # Handle empty filenames
+    
+    # Check if the name actually needs to be cleaned
+    has_invalid_chars = (INVALID_CHARACTERS.search(entry) or 
+                         PROBLEM_CHAR_REGEX.search(entry) or 
+                         "\u00A0" in entry or
+                         is_reserved_name(entry) or
+                         re.search(r'\.{2,}', entry) or
+                         entry.endswith('.') or
+                         ' .' in entry)
+    
+    if not has_invalid_chars:
+        return entry  # Return unchanged if already valid
     
     # Initial replacements for invalid characters
     entry = entry.replace("\u00A0", " ")  # Replace non-breaking spaces
@@ -34,24 +50,38 @@ def clean_filename(entry):
     entry = PROBLEM_CHAR_REGEX.sub("-", entry)  # Replace problematic Unicode characters with '-'
     
     # Handle file extension separately to ensure proper cleanup
-    name_part, ext_part = os.path.splitext(entry)
+    base_name, ext = os.path.splitext(entry)
     
-    # Clean the name part
-    name_part = re.sub(r'\s+', ' ', name_part).strip()  # Normalize spaces
+    # Special handling for files like "April ....doc" to avoid "April .doc"
+    # First normalize spaces
+    base_name = re.sub(r'\s+', ' ', base_name).strip()
     
-    # Handle periods in the name part (not the extension)
-    if not name_part.startswith("."):  # Skip hidden/system files
-        name_part = re.sub(r'\.{2,}', '.', name_part)  # Replace multiple periods with a single one
-        name_part = name_part.rstrip('.')  # Remove trailing periods in name part
+    # Handle periods in base name
+    if not base_name.startswith('.'):  # Skip hidden/system files
+        # Replace sequences of periods with single period
+        base_name = re.sub(r'\.{2,}', '.', base_name)
+        # Remove trailing periods
+        base_name = base_name.rstrip('.')
+        # Remove spaces before periods
+        base_name = re.sub(r' \.$', '.', base_name)
+        base_name = re.sub(r' \.', '.', base_name)
     
-    # Handle empty name after cleaning (e.g., if it was just "...")
-    if not name_part and ext_part:
-        name_part = "file"  # Provide a default name for files that had only problematic characters
+    # Handle empty name after cleaning
+    if not base_name and ext:
+        print(f"⚠️ Warning: Filename '{original_entry}' became empty after cleaning, using 'file' as base name")
+        base_name = "file"
+    elif not base_name:
+        print(f"⚠️ Warning: Filename '{original_entry}' became empty after cleaning, using 'unnamed_file' instead")
+        return "unnamed_file"
     
-    # Recombine name and extension
-    entry = name_part + ext_part
+    # Ensure no spaces before extension
+    entry = base_name + ext
     
-    # Final cleanup pass to ensure SMB compatibility
+    # Final SMB-compatibility check
+    # Remove any remaining spaces before extension that might have been missed
+    entry = re.sub(r' (\.[a-zA-Z0-9]+)$', r'\1', entry)
+    
+    # Final cleanup pass
     entry = entry.strip()  # No leading/trailing spaces in final result
     
     # Handle Windows reserved names by appending an underscore
@@ -148,11 +178,20 @@ def fix_permissions(path):
 def rename_if_needed(path, rename_list):
     """Check for invalid characters in file/folder name and store changes for bulk confirmation."""
     dirpath, name = os.path.split(path)
+    
+    # Skip empty names (shouldn't happen but just in case)
+    if not name:
+        print(f"⚠️ Warning: Empty filename detected at path: {path}")
+        return path
+        
     new_name = clean_filename(name)
 
     if new_name == name:
         return path  # No changes needed
 
+    # Log what's being changed for debugging
+    print(f"🔍 Debug: Cleaning '{name}' to '{new_name}' in '{dirpath}'")
+    
     new_path = os.path.join(dirpath, new_name)
 
     # Ensure the new name does not already exist
@@ -214,6 +253,9 @@ def process_files_and_folders(root_dir):
     current_user = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip()
     logged_in_user = ""
     
+    # Get absolute path of root directory for consistent handling
+    root_dir = os.path.abspath(root_dir)
+    
     if IS_MACOS:
         logged_in_user = subprocess.run(["stat", "-f%Su", "/dev/console"], capture_output=True, text=True).stdout.strip()
         print(f"🍎 Running on macOS - Full fixes including permissions, ownership and locks")
@@ -227,7 +269,26 @@ def process_files_and_folders(root_dir):
     rename_list = []
     
     try:
-        process_folder(root_dir, current_user, logged_in_user, rename_list)
+        # Apply permissions/ownership fixes to root directory if needed, but don't rename it
+        if IS_MACOS:
+            unlock_file(root_dir, current_user, logged_in_user)
+            fix_ownership(root_dir, current_user)
+            fix_permissions(root_dir)
+            
+        # Process contents of root directory
+        try:
+            with os.scandir(root_dir) as entries:
+                for entry in entries:
+                    path = entry.path
+                    if should_exclude(path):
+                        continue
+                    if entry.is_dir():
+                        process_folder(path, current_user, logged_in_user, rename_list)
+                    elif entry.is_file():
+                        process_file(path, current_user, logged_in_user, rename_list)
+        except Exception as e:
+            print(f"⚠️ Error processing root directory {root_dir}: {e}")
+                
     except KeyboardInterrupt:
         print("\n🚫 Script interrupted by user.")
         sys.exit(1)
@@ -238,19 +299,25 @@ def process_files_and_folders(root_dir):
         print("✅ No problematic filenames found.")
         return
 
+    # Sort the rename list by path depth (descending) to process deepest paths first
+    # This ensures we rename child items before their parent folders
+    rename_list.sort(key=lambda x: x[0].count(os.sep), reverse=True)
+
     print("\n⚠️ The following files/folders will be renamed:\n")
     for old_path, new_path in rename_list:
-        print(f"  - {old_path} → {new_path}")
+        # Using colorful output and bold arrow for better visibility
+        print(f"  - \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
 
     response = input("\n🔄 Apply all renames? (yes/no): ").strip().lower()
     if response not in ["yes", "y"]:
         print("❌ No changes were made.")
         return
 
+    # Perform renames in the sorted order (deepest paths first)
     for old_path, new_path in rename_list:
         try:
             os.rename(old_path, new_path)
-            print(f"✅ Renamed: {old_path} → {new_path}")
+            print(f"✅ Renamed: \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
         except Exception as e:
             print(f"❌ Error renaming {old_path}: {e}")
 
