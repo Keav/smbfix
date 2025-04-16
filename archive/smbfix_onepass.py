@@ -3,60 +3,26 @@ import re
 import sys
 import subprocess
 import getpass
-import platform
 
 # Define invalid SMB characters
 PROBLEM_CHAR_REGEX = re.compile(r"[\x00-\x1F\x7F\uE000-\uF8FF\u0300-\u036F]")
 INVALID_CHARACTERS = re.compile(r'[\\/:*?"<>|+\[\]]')  # Keep existing invalid SMB characters
-# Windows reserved names (case-insensitive)
-RESERVED_NAMES = ['CON', 'PRN', 'AUX', 'NUL'] + [f'COM{i}' for i in range(1, 10)] + [f'LPT{i}' for i in range(1, 10)]
 stored_passwords = {}
-
-# Platform detection
-IS_MACOS = platform.system() == "Darwin"  
-IS_SYNOLOGY = os.path.exists("/etc/synoinfo.conf")
 
 # ------------------ FILE & FOLDER CLEANUP FUNCTIONS ------------------ #
 
-def is_reserved_name(name):
-    """Check if a name is a Windows reserved name (ignoring extension)."""
-    basename = os.path.splitext(name)[0]
-    return basename.upper() in RESERVED_NAMES
-
 def clean_filename(entry):
     """Fix filename by replacing invalid characters, removing unnecessary spaces, and ensuring proper formatting."""
-    if not entry:
-        return "unnamed_file"  # Handle empty filenames
-    
-    # Initial replacements for invalid characters
     entry = entry.replace("\u00A0", " ")  # Replace non-breaking spaces
     entry = INVALID_CHARACTERS.sub('-', entry)  # Replace invalid SMB characters
     entry = PROBLEM_CHAR_REGEX.sub("-", entry)  # Replace problematic Unicode characters with '-'
+    entry = re.sub(r'\s+', ' ', entry).strip()  # Remove extra spaces
+    entry = re.sub(r' (\.[a-zA-Z0-9]+)$', r'\1', entry)  # Remove space before file extension
     
-    # Handle file extension separately to ensure proper cleanup
-    name_part, ext_part = os.path.splitext(entry)
-    
-    # Clean the name part
-    name_part = re.sub(r'\s+', ' ', name_part).strip()  # Normalize spaces
-    
-    # Handle periods in the name part (not the extension)
-    if not name_part.startswith("."):  # Skip hidden/system files
-        name_part = re.sub(r'\.{2,}', '.', name_part)  # Replace multiple periods with a single one
-        name_part = name_part.rstrip('.')  # Remove trailing periods in name part
-    
-    # Handle empty name after cleaning (e.g., if it was just "...")
-    if not name_part and ext_part:
-        name_part = "file"  # Provide a default name for files that had only problematic characters
-    
-    # Recombine name and extension
-    entry = name_part + ext_part
-    
-    # Final cleanup pass to ensure SMB compatibility
-    entry = entry.strip()  # No leading/trailing spaces in final result
-    
-    # Handle Windows reserved names by appending an underscore
-    if is_reserved_name(entry):
-        entry = entry + "_"
+    # Ensure periods are correctly formatted
+    if not entry.startswith("."):  # Skip hidden/system files
+        entry = re.sub(r'\.{2,}', '.', entry)  # Replace multiple periods with a single one
+        entry = entry.rstrip('.')  # Remove trailing periods
     
     return entry
 
@@ -67,10 +33,7 @@ def should_exclude(path):
     return "iPhoto Library" in path or ".abbu/" in path or path.lower().endswith(".abbu") or ".photoslibrary/" in path or path.lower().endswith(".photoslibrary")
 
 def is_locked(path):
-    """Check if a file or folder is locked. Only applicable for macOS."""
-    if not IS_MACOS:
-        return False
-        
+    """Check if a file or folder is locked."""
     result = subprocess.run(['find', path, '-flags', 'uchg'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return bool(result.stdout.strip())
 
@@ -93,9 +56,6 @@ def get_owner(path):
 
 def unlock_file(path, current_user, logged_in_user):
     """Unlock a file only if it is locked, using sudo -u logged_in_user."""
-    if not IS_MACOS:
-        return False  # Skip for non-macOS systems
-        
     if is_locked(path):
         print(f"\n🔓 Unlocking file: {path}")
         if logged_in_user not in stored_passwords:
@@ -115,9 +75,6 @@ def unlock_file(path, current_user, logged_in_user):
 
 def fix_ownership(path, current_user):
     """Fix ownership of a file or folder only if incorrect."""
-    if not IS_MACOS:  # Skip for non-macOS systems
-        return
-        
     try:
         if get_owner(path) != os.getuid():
             print(f"🛠️ Changing ownership: {path}")
@@ -128,9 +85,6 @@ def fix_ownership(path, current_user):
 
 def fix_permissions(path):
     """Ensure minimum permissions of 600 for files and 700 for folders."""
-    if not IS_MACOS:  # Skip for non-macOS systems
-        return
-        
     try:
         permissions = get_permissions(path)
         if permissions is not None:
@@ -172,20 +126,14 @@ def process_folder(folder, current_user, logged_in_user, rename_list):
     if should_exclude(folder):
         return
     
-    if IS_MACOS:
-        unlock_file(folder, current_user, logged_in_user)
-        fix_ownership(folder, current_user)
-        fix_permissions(folder)
+    unlock_file(folder, current_user, logged_in_user)
+    fix_ownership(folder, current_user)
+    fix_permissions(folder)
 
-    # Store the original path before any potential renaming for directory scanning
-    original_folder = folder
-    
-    # Add the folder to rename list if needed, but keep using original path for scanning
-    new_folder = rename_if_needed(folder, rename_list)
+    folder = rename_if_needed(folder, rename_list)
 
     try:
-        # Use the original folder path for scanning, as the rename hasn't happened yet
-        with os.scandir(original_folder) as entries:
+        with os.scandir(folder) as entries:
             for entry in entries:
                 path = entry.path
                 if should_exclude(path):
@@ -202,25 +150,16 @@ def process_file(file, current_user, logged_in_user, rename_list):
     if should_exclude(file):
         return
 
-    if IS_MACOS:
-        unlock_file(file, current_user, logged_in_user)
-        fix_ownership(file, current_user)
-        fix_permissions(file)
+    unlock_file(file, current_user, logged_in_user)
+    fix_ownership(file, current_user)
+    fix_permissions(file)
 
     rename_if_needed(file, rename_list)
 
 def process_files_and_folders(root_dir):
     """Main function to process all files and folders, preview changes, and apply them in bulk."""
     current_user = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip()
-    logged_in_user = ""
-    
-    if IS_MACOS:
-        logged_in_user = subprocess.run(["stat", "-f%Su", "/dev/console"], capture_output=True, text=True).stdout.strip()
-        print(f"🍎 Running on macOS - Full fixes including permissions, ownership and locks")
-    elif IS_SYNOLOGY:
-        print(f"📦 Running on Synology NAS - Limited to filename fixes only")
-    else:
-        print(f"🖥️ Running on {platform.system()} - Limited to filename fixes only")
+    logged_in_user = subprocess.run(["stat", "-f%Su", "/dev/console"], capture_output=True, text=True).stdout.strip()
 
     print(f"\n🔍 Scanning for issues in: {root_dir}")
 
