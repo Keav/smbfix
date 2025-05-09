@@ -11,10 +11,60 @@ INVALID_CHARACTERS = re.compile(r'[\\/:*?"<>|+\[\]]')  # Keep existing invalid S
 # Windows reserved names (case-insensitive)
 RESERVED_NAMES = ['CON', 'PRN', 'AUX', 'NUL'] + [f'COM{i}' for i in range(1, 10)] + [f'LPT{i}' for i in range(1, 10)]
 stored_passwords = {}
+sudo_timestamp_refreshed = False  # Track if we've refreshed the sudo timestamp
 
 # Platform detection
 IS_MACOS = platform.system() == "Darwin"  
 IS_SYNOLOGY = os.path.exists("/etc/synoinfo.conf")
+
+# ------------------ ENVIRONMENT CHECK ------------------ #
+
+def check_environment():
+    """Check if all required modules are available and the environment is correctly set up."""
+    required_modules = {
+        'os': 'Core functionality for file operations',
+        're': 'Regular expressions for pattern matching',
+        'sys': 'System-specific parameters and functions',
+        'subprocess': 'Subprocess management',
+        'getpass': 'Secure password input',
+        'platform': 'Platform identification'
+    }
+    
+    print("\n🔍 Checking Python environment...\n")
+    print(f"Python version: {platform.python_version()}")
+    print(f"Platform: {platform.platform()}")
+    print(f"System: {platform.system()} {platform.release()}")
+    
+    # Check for required modules
+    missing = []
+    for module, description in required_modules.items():
+        try:
+            __import__(module)
+            print(f"✅ {module}: Found - {description}")
+        except ImportError:
+            print(f"❌ {module}: Missing - {description}")
+            missing.append(module)
+    
+    # Check for administrative permissions on macOS
+    if platform.system() == "Darwin":
+        try:
+            # Try a simple sudo command to check if sudo access works
+            with open(os.devnull, 'w') as DEVNULL:
+                subprocess.check_call(["sudo", "-n", "echo", "Testing sudo"], 
+                                     stdout=DEVNULL, stderr=DEVNULL)
+            print("✅ sudo access: Available - Can execute administrative commands")
+        except subprocess.CalledProcessError:
+            print("⚠️ sudo access: Requires password - Will prompt during execution")
+        except Exception:
+            print("⚠️ sudo access: Unknown - May have issues with permission operations")
+    
+    if missing:
+        print("\n❌ Environment check failed. Missing required modules.")
+        print("Install missing modules with: pip install " + " ".join(missing))
+        return False
+    else:
+        print("\n✅ Environment check passed. All required modules are available.")
+        return True
 
 # ------------------ FILE & FOLDER CLEANUP FUNCTIONS ------------------ #
 
@@ -38,7 +88,10 @@ def clean_filename(entry):
                          "\u00A0" in entry or
                          is_reserved_name(entry) or
                          re.search(r'\.{2,}', entry) or
-                         entry.endswith('.') or
+                         entry.endswith('.') or  # This check catches trailing periods
+                         entry.endswith(' ') or  # Check for trailing spaces
+                         entry.startswith(' ') or # Check for leading spaces
+                         re.search(r'\s{2,}', entry) or  # Check for multiple consecutive spaces
                          ' .' in entry)
     
     if not has_invalid_chars:
@@ -56,12 +109,15 @@ def clean_filename(entry):
     # First normalize spaces
     base_name = re.sub(r'\s+', ' ', base_name).strip()
     
-    # Handle periods in base name
-    if not base_name.startswith('.'):  # Skip hidden/system files
+    # SPECIAL HANDLING: Check for trailing periods in base_name regardless of hidden status
+    if base_name.endswith('.'):
+        # Replace trailing period with dash for ALL files including hidden ones
+        base_name = base_name[:-1] + '-'
+    
+    # General period handling for non-hidden files
+    if not base_name.startswith('.'):  # Skip some period handling for hidden files
         # Replace sequences of periods with single period
         base_name = re.sub(r'\.{2,}', '.', base_name)
-        # Remove trailing periods
-        base_name = base_name.rstrip('.')
         # Remove spaces before periods
         base_name = re.sub(r' \.$', '.', base_name)
         base_name = re.sub(r' \.', '.', base_name)
@@ -84,9 +140,29 @@ def clean_filename(entry):
     # Final cleanup pass
     entry = entry.strip()  # No leading/trailing spaces in final result
     
+    # Trailing period check as final step (catches any trailing periods added during processing)
+    if entry.endswith('.') and not entry == '.':
+        entry = entry[:-1] + '-'
+    
     # Handle Windows reserved names by appending an underscore
     if is_reserved_name(entry):
         entry = entry + "_"
+    
+    # Make sure we've fixed ALL issues by recursively cleaning
+    # if the name has changed and might still have issues
+    if entry != original_entry:
+        # Check if there are still issues to fix
+        still_has_issues = (INVALID_CHARACTERS.search(entry) or 
+                           PROBLEM_CHAR_REGEX.search(entry) or 
+                           "\u00A0" in entry or
+                           is_reserved_name(entry) or
+                           re.search(r'\.{2,}', entry) or
+                           entry.endswith('.') or
+                           ' .' in entry)
+        
+        if still_has_issues:
+            print(f"🔄 Multiple issues detected in '{original_entry}', performing additional cleaning")
+            entry = clean_filename(entry)  # Recursive call to fix remaining issues
     
     return entry
 
@@ -123,6 +199,8 @@ def get_owner(path):
 
 def unlock_file(path, current_user, logged_in_user):
     """Unlock a file only if it is locked, using sudo -u logged_in_user."""
+    global sudo_timestamp_refreshed
+    
     if not IS_MACOS:
         return False  # Skip for non-macOS systems
         
@@ -130,6 +208,16 @@ def unlock_file(path, current_user, logged_in_user):
         print(f"\n🔓 Unlocking file: {path}")
         if logged_in_user not in stored_passwords:
             stored_passwords[logged_in_user] = getpass.getpass(f"Password for {current_user} (to unlock files): ")
+            
+            # Initialize sudo session once to avoid repeated password prompts
+            if not sudo_timestamp_refreshed:
+                print("🔑 Initializing sudo session...")
+                cmd = 'echo "Initializing sudo session"'
+                subprocess.run(["sudo", "-S", "sh", "-c", cmd], 
+                               input=stored_passwords[logged_in_user], 
+                               text=True, 
+                               stdout=subprocess.PIPE)
+                sudo_timestamp_refreshed = True
 
         cmd = f'chflags -R nouchg "{path}"'
         child = subprocess.run(["sudo", "-u", logged_in_user, "sh", "-c", cmd],
@@ -145,12 +233,25 @@ def unlock_file(path, current_user, logged_in_user):
 
 def fix_ownership(path, current_user):
     """Fix ownership of a file or folder only if incorrect."""
+    global sudo_timestamp_refreshed
+    
     if not IS_MACOS:  # Skip for non-macOS systems
         return
         
     try:
         if get_owner(path) != os.getuid():
             print(f"🛠️ Changing ownership: {path}")
+            
+            # Make sure we have initialized the sudo session
+            if not sudo_timestamp_refreshed and current_user in stored_passwords:
+                print("🔑 Initializing sudo session...")
+                cmd = 'echo "Initializing sudo session"'
+                subprocess.run(["sudo", "-S", "sh", "-c", cmd], 
+                               input=stored_passwords[current_user], 
+                               text=True, 
+                               stdout=subprocess.PIPE)
+                sudo_timestamp_refreshed = True
+                
             subprocess.run(["sudo", "chown", "-R", f"{current_user}:staff", path], check=True)
             print(f"✅ Ownership fixed: {path}")
     except Exception as e:
@@ -250,6 +351,8 @@ def process_file(file, current_user, logged_in_user, rename_list):
 
 def process_files_and_folders(root_dir):
     """Main function to process all files and folders, preview changes, and apply them in bulk."""
+    global sudo_timestamp_refreshed
+    
     current_user = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip()
     logged_in_user = ""
     
@@ -259,6 +362,18 @@ def process_files_and_folders(root_dir):
     if IS_MACOS:
         logged_in_user = subprocess.run(["stat", "-f%Su", "/dev/console"], capture_output=True, text=True).stdout.strip()
         print(f"🍎 Running on macOS - Full fixes including permissions, ownership and locks")
+        
+        # Ask for password upfront to establish sudo session
+        if current_user not in stored_passwords:
+            stored_passwords[current_user] = getpass.getpass(f"Password for {current_user} (for permission changes): ")
+            print("🔑 Initializing sudo session...")
+            cmd = 'echo "Initializing sudo session"'
+            subprocess.run(["sudo", "-S", "sh", "-c", cmd], 
+                          input=stored_passwords[current_user], 
+                          text=True, 
+                          stdout=subprocess.PIPE)
+            sudo_timestamp_refreshed = True
+            
     elif IS_SYNOLOGY:
         print(f"📦 Running on Synology NAS - Limited to filename fixes only")
     else:
@@ -324,5 +439,10 @@ def process_files_and_folders(root_dir):
     print("\n🎉 Done! Check your files.")
 
 if __name__ == "__main__":
+    # Check if we're being asked to verify the environment
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-env":
+        check_environment()
+        sys.exit(0)
+        
     root_dir = sys.argv[1] if len(sys.argv) > 1 else '.'
     process_files_and_folders(root_dir)
