@@ -206,22 +206,22 @@ def unlock_file(path, current_user, logged_in_user):
         
     if is_locked(path):
         print(f"\n🔓 Unlocking file: {path}")
-        if logged_in_user not in stored_passwords:
-            stored_passwords[logged_in_user] = getpass.getpass(f"Password for {current_user} (to unlock files): ")
+        if current_user not in stored_passwords:
+            stored_passwords[current_user] = getpass.getpass(f"Password for {current_user} (to unlock files): ")
             
             # Initialize sudo session once to avoid repeated password prompts
             if not sudo_timestamp_refreshed:
                 print("🔑 Initializing sudo session...")
                 cmd = 'echo "Initializing sudo session"'
                 subprocess.run(["sudo", "-S", "sh", "-c", cmd], 
-                               input=stored_passwords[logged_in_user], 
+                               input=stored_passwords[current_user] + "\n", 
                                text=True, 
                                stdout=subprocess.PIPE)
                 sudo_timestamp_refreshed = True
 
         cmd = f'chflags -R nouchg "{path}"'
-        child = subprocess.run(["sudo", "-u", logged_in_user, "sh", "-c", cmd],
-                               input=stored_passwords[logged_in_user], text=True)
+        child = subprocess.run(["sudo", "sh", "-c", cmd],
+                              text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         if child.returncode != 0:
             print(f"❌ Failed to unlock: {path}")
@@ -243,13 +243,16 @@ def fix_ownership(path, current_user):
             print(f"🛠️ Changing ownership: {path}")
             
             # Make sure we have initialized the sudo session
-            if not sudo_timestamp_refreshed and current_user in stored_passwords:
+            if current_user not in stored_passwords:
+                stored_passwords[current_user] = getpass.getpass(f"Password for {current_user} (for permission changes): ")
+                
+            if not sudo_timestamp_refreshed:
                 print("🔑 Initializing sudo session...")
                 cmd = 'echo "Initializing sudo session"'
                 subprocess.run(["sudo", "-S", "sh", "-c", cmd], 
-                               input=stored_passwords[current_user], 
-                               text=True, 
-                               stdout=subprocess.PIPE)
+                              input=stored_passwords[current_user] + "\n", 
+                              text=True, 
+                              stdout=subprocess.PIPE)
                 sudo_timestamp_refreshed = True
                 
             subprocess.run(["sudo", "chown", "-R", f"{current_user}:staff", path], check=True)
@@ -363,16 +366,8 @@ def process_files_and_folders(root_dir):
         logged_in_user = subprocess.run(["stat", "-f%Su", "/dev/console"], capture_output=True, text=True).stdout.strip()
         print(f"🍎 Running on macOS - Full fixes including permissions, ownership and locks")
         
-        # Ask for password upfront to establish sudo session
-        if current_user not in stored_passwords:
-            stored_passwords[current_user] = getpass.getpass(f"Password for {current_user} (for permission changes): ")
-            print("🔑 Initializing sudo session...")
-            cmd = 'echo "Initializing sudo session"'
-            subprocess.run(["sudo", "-S", "sh", "-c", cmd], 
-                          input=stored_passwords[current_user], 
-                          text=True, 
-                          stdout=subprocess.PIPE)
-            sudo_timestamp_refreshed = True
+        # We'll ask for password only if needed during processing
+        # No need to ask upfront
             
     elif IS_SYNOLOGY:
         print(f"📦 Running on Synology NAS - Limited to filename fixes only")
