@@ -8,19 +8,6 @@ import json
 from pathlib import Path
 import base64
 
-# Add the keyring import for secure password storage with better error handling
-try:
-    import keyring
-    # Test keyring access immediately to validate if it works
-    try:
-        keyring.get_password("smbfix_test", "test_user")
-        KEYRING_AVAILABLE = True
-    except Exception as e:
-        print(f"⚠️ Keyring detected but not working properly: {e}")
-        KEYRING_AVAILABLE = False
-except ImportError:
-    KEYRING_AVAILABLE = False
-
 # Define invalid SMB characters
 PROBLEM_CHAR_REGEX = re.compile(r"[\x00-\x1F\x7F\uE000-\uF8FF\u0300-\u036F]")
 INVALID_CHARACTERS = re.compile(r'[\\/:*?"<>|+\[\]]')  # Keep existing invalid SMB characters
@@ -35,8 +22,8 @@ IS_SYNOLOGY = os.path.exists("/etc/synoinfo.conf")
 
 # ------------------ CREDENTIAL MANAGEMENT ------------------ #
 
-def get_fallback_password_path():
-    """Get path to fallback password storage file."""
+def get_password_file_path():
+    """Get path to password storage file."""
     home_dir = str(Path.home())
     config_dir = os.path.join(home_dir, '.config', 'smbfix')
     os.makedirs(config_dir, exist_ok=True)
@@ -54,48 +41,26 @@ def decrypt_simple(encoded):
         return None
 
 def get_stored_password(username):
-    """Get password from keyring or fallback file if available, otherwise return None."""
-    # Try keyring first if available
-    if KEYRING_AVAILABLE:
-        try:
-            password = keyring.get_password("smbfix", username)
-            if password:
-                print(f"✅ Found stored credentials for {username} (using keyring)")
-                return password
-        except Exception as e:
-            print(f"⚠️ Could not retrieve stored password from keyring: {e}")
-    
-    # Try fallback file if keyring fails
+    """Get password from file if available, otherwise return None."""
     try:
-        cred_path = get_fallback_password_path()
+        cred_path = get_password_file_path()
         if os.path.exists(cred_path):
             with open(cred_path, 'r') as f:
                 creds = json.load(f)
                 if username in creds:
                     decoded = decrypt_simple(creds[username])
                     if decoded:
-                        print(f"✅ Found stored credentials for {username} (using file)")
+                        print(f"✅ Found stored credentials for {username}")
                         return decoded
     except Exception as e:
-        print(f"⚠️ Could not retrieve stored password from file: {e}")
+        print(f"⚠️ Could not retrieve stored password: {e}")
         
     return None
 
 def store_password(username, password):
-    """Store password in keyring or fallback file if keyring fails."""
-    # Try keyring first
-    if KEYRING_AVAILABLE:
-        try:
-            keyring.set_password("smbfix", username, password)
-            print(f"✅ Stored credentials for {username} (using keyring)")
-            return True
-        except Exception as e:
-            print(f"⚠️ Could not store password in keyring: {e}")
-            print("   Falling back to file-based storage...")
-    
-    # Use fallback file storage
+    """Store password in file."""
     try:
-        cred_path = get_fallback_password_path()
+        cred_path = get_password_file_path()
         
         # Read existing credentials if file exists
         creds = {}
@@ -116,28 +81,16 @@ def store_password(username, password):
         # Set secure permissions
         os.chmod(cred_path, 0o600)
         
-        print(f"✅ Stored credentials for {username} (using file)")
+        print(f"✅ Stored credentials for {username}")
         return True
     except Exception as e:
-        print(f"⚠️ Could not store password in file: {e}")
+        print(f"⚠️ Could not store password: {e}")
         return False
 
 def forget_credentials(username):
-    """Remove stored credentials from both keyring and fallback file."""
-    success = False
-    
-    # Try to remove from keyring
-    if KEYRING_AVAILABLE:
-        try:
-            keyring.delete_password("smbfix", username)
-            print(f"✅ Removed keyring credentials for {username}")
-            success = True
-        except:
-            pass
-    
-    # Try to remove from fallback file
+    """Remove stored credentials."""
     try:
-        cred_path = get_fallback_password_path()
+        cred_path = get_password_file_path()
         if os.path.exists(cred_path):
             with open(cred_path, 'r') as f:
                 creds = json.load(f)
@@ -146,15 +99,64 @@ def forget_credentials(username):
                 del creds[username]
                 with open(cred_path, 'w') as f:
                     json.dump(creds, f)
-                print(f"✅ Removed file-based credentials for {username}")
-                success = True
+                print(f"✅ Removed stored credentials for {username}")
+                return True
+            else:
+                print(f"⚠️ No stored credentials found for {username}")
+        else:
+            print(f"⚠️ No credential file exists")
     except Exception as e:
-        print(f"⚠️ Error removing file-based credentials: {e}")
+        print(f"⚠️ Error removing credentials: {e}")
     
-    return success
+    return False
 
-# Keep the get_password and refresh_sudo_timestamp functions as they are
-# ...existing code...
+def get_password(username, prompt_message=None):
+    """Get password from storage or prompt user if not stored."""
+    global stored_passwords
+    
+    # Check if already in memory for this session
+    if username in stored_passwords:
+        return stored_passwords[username]
+    
+    # Try to get from file storage
+    password = get_stored_password(username)
+    
+    # If not found, prompt user
+    if not password:
+        prompt_message = prompt_message or f"Password for {username} (will be stored for future use): "
+        password = getpass.getpass(prompt_message)
+        
+        # Store for future use
+        if password:
+            store_password(username, password)
+    
+    # Store in memory for this session
+    stored_passwords[username] = password
+    return password
+
+def refresh_sudo_timestamp(password):
+    """Initialize sudo session to avoid repeated password prompts during script execution."""
+    global sudo_timestamp_refreshed
+    
+    if sudo_timestamp_refreshed:
+        return True
+    
+    print("🔑 Initializing sudo session...")
+    cmd = 'echo "Initializing sudo session"'
+    result = subprocess.run(
+        ["sudo", "-S", "sh", "-c", cmd],
+        input=password + "\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    
+    if result.returncode == 0:
+        sudo_timestamp_refreshed = True
+        return True
+    else:
+        print(f"⚠️ Failed to initialize sudo session: {result.stderr}")
+        return False
 
 # ------------------ ENVIRONMENT CHECK ------------------ #
 
@@ -171,34 +173,6 @@ def check_environment():
         'base64': 'Basic encoding/decoding for credential storage'
     }
     
-    optional_modules = {
-        'keyring': 'Secure credential storage (with OS keychain)'
-    }
-    
-    print("\n🔍 Checking Python environment...\n")
-    print(f"Python version: {platform.python_version()}")
-    print(f"Platform: {platform.platform()}")
-    print(f"System: {platform.system()} {platform.release()}")
-    
-    # Check for required modules
-    missing = []
-    for module, description in required_modules.items():
-        try:
-            __import__(module)
-            print(f"✅ {module}: Found - {description}")
-        except ImportError:
-            print(f"❌ {module}: Missing - {description}")
-            missing.append(module)
-    
-    # Check for optional modules
-    for module, description in optional_modules.items():
-        try:
-            __import__(module)
-            print(f"✅ {module}: Found - {description}")
-        except ImportError:
-            print(f"⚠️ {module}: Not found - {description}")
-            print(f"  To enable secure credential storage: pip install {module}")
-
     print("\n🔍 Checking Python environment...\n")
     print(f"Python version: {platform.python_version()}")
     print(f"Platform: {platform.platform()}")
@@ -523,12 +497,7 @@ def process_files_and_folders(root_dir):
     if IS_MACOS:
         logged_in_user = subprocess.run(["stat", "-f%Su", "/dev/console"], capture_output=True, text=True).stdout.strip()
         print(f"🍎 Running on macOS - Full fixes including permissions, ownership and locks")
-        
-        if not KEYRING_AVAILABLE:
-            print("⚠️ Keyring package not available. Passwords will only be stored for this session.")
-            print("   Install keyring for persistent password storage: pip install keyring")
-        else:
-            print("✅ Using keyring for secure password storage")
+        print(f"✅ Using file-based credential storage for passwords")
             
     elif IS_SYNOLOGY:
         print(f"📦 Running on Synology NAS - Limited to filename fixes only")
