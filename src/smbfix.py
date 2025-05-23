@@ -5,6 +5,13 @@ import subprocess
 import getpass
 import platform
 
+# Add the keyring import for secure password storage
+try:
+    import keyring
+    KEYRING_AVAILABLE = True
+except ImportError:
+    KEYRING_AVAILABLE = False
+
 # Define invalid SMB characters
 PROBLEM_CHAR_REGEX = re.compile(r"[\x00-\x1F\x7F\uE000-\uF8FF\u0300-\u036F]")
 INVALID_CHARACTERS = re.compile(r'[\\/:*?"<>|+\[\]]')  # Keep existing invalid SMB characters
@@ -16,6 +23,79 @@ sudo_timestamp_refreshed = False  # Track if we've refreshed the sudo timestamp
 # Platform detection
 IS_MACOS = platform.system() == "Darwin"  
 IS_SYNOLOGY = os.path.exists("/etc/synoinfo.conf")
+
+# ------------------ CREDENTIAL MANAGEMENT ------------------ #
+
+def get_stored_password(username):
+    """Get password from keyring if available, otherwise return None."""
+    if KEYRING_AVAILABLE:
+        try:
+            password = keyring.get_password("smbfix", username)
+            if password:
+                print(f"✅ Found stored credentials for {username}")
+                return password
+        except Exception as e:
+            print(f"⚠️ Could not retrieve stored password: {e}")
+    return None
+
+def store_password(username, password):
+    """Store password in keyring if available."""
+    if KEYRING_AVAILABLE:
+        try:
+            keyring.set_password("smbfix", username, password)
+            print(f"✅ Stored credentials for {username}")
+            return True
+        except Exception as e:
+            print(f"⚠️ Could not store password: {e}")
+    return False
+
+def get_password(username, prompt_message=None):
+    """Get password from storage or prompt user if not stored."""
+    global stored_passwords
+    
+    # Check if already in memory for this session
+    if username in stored_passwords:
+        return stored_passwords[username]
+    
+    # Try to get from keyring
+    password = get_stored_password(username)
+    
+    # If not in keyring, prompt user
+    if not password:
+        prompt_message = prompt_message or f"Password for {username} (will be securely stored): "
+        password = getpass.getpass(prompt_message)
+        
+        # Store in keyring for future use
+        if password and KEYRING_AVAILABLE:
+            store_password(username, password)
+    
+    # Store in memory for this session
+    stored_passwords[username] = password
+    return password
+
+def refresh_sudo_timestamp(password):
+    """Initialize sudo session to avoid repeated password prompts during script execution."""
+    global sudo_timestamp_refreshed
+    
+    if sudo_timestamp_refreshed:
+        return True
+    
+    print("🔑 Initializing sudo session...")
+    cmd = 'echo "Initializing sudo session"'
+    result = subprocess.run(
+        ["sudo", "-S", "sh", "-c", cmd],
+        input=password + "\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    
+    if result.returncode == 0:
+        sudo_timestamp_refreshed = True
+        return True
+    else:
+        print(f"⚠️ Failed to initialize sudo session: {result.stderr}")
+        return False
 
 # ------------------ ENVIRONMENT CHECK ------------------ #
 
@@ -30,6 +110,34 @@ def check_environment():
         'platform': 'Platform identification'
     }
     
+    optional_modules = {
+        'keyring': 'Secure credential storage'
+    }
+    
+    print("\n🔍 Checking Python environment...\n")
+    print(f"Python version: {platform.python_version()}")
+    print(f"Platform: {platform.platform()}")
+    print(f"System: {platform.system()} {platform.release()}")
+    
+    # Check for required modules
+    missing = []
+    for module, description in required_modules.items():
+        try:
+            __import__(module)
+            print(f"✅ {module}: Found - {description}")
+        except ImportError:
+            print(f"❌ {module}: Missing - {description}")
+            missing.append(module)
+    
+    # Check for optional modules
+    for module, description in optional_modules.items():
+        try:
+            __import__(module)
+            print(f"✅ {module}: Found - {description}")
+        except ImportError:
+            print(f"⚠️ {module}: Not found - {description}")
+            print(f"  To enable secure credential storage: pip install {module}")
+
     print("\n🔍 Checking Python environment...\n")
     print(f"Python version: {platform.python_version()}")
     print(f"Platform: {platform.platform()}")
@@ -198,7 +306,7 @@ def get_owner(path):
 # ------------------ FIX FUNCTIONS ------------------ #
 
 def unlock_file(path, current_user, logged_in_user):
-    """Unlock a file only if it is locked, using sudo -u logged_in_user."""
+    """Unlock a file only if it is locked, using sudo."""
     global sudo_timestamp_refreshed
     
     if not IS_MACOS:
@@ -206,18 +314,13 @@ def unlock_file(path, current_user, logged_in_user):
         
     if is_locked(path):
         print(f"\n🔓 Unlocking file: {path}")
-        if current_user not in stored_passwords:
-            stored_passwords[current_user] = getpass.getpass(f"Password for {current_user} (to unlock files): ")
+        
+        # Get the password (from keyring or prompt)
+        password = get_password(current_user)
             
-            # Initialize sudo session once to avoid repeated password prompts
-            if not sudo_timestamp_refreshed:
-                print("🔑 Initializing sudo session...")
-                cmd = 'echo "Initializing sudo session"'
-                subprocess.run(["sudo", "-S", "sh", "-c", cmd], 
-                               input=stored_passwords[current_user] + "\n", 
-                               text=True, 
-                               stdout=subprocess.PIPE)
-                sudo_timestamp_refreshed = True
+        # Initialize sudo session if needed
+        if not sudo_timestamp_refreshed:
+            refresh_sudo_timestamp(password)
 
         cmd = f'chflags -R nouchg "{path}"'
         child = subprocess.run(["sudo", "sh", "-c", cmd],
@@ -242,18 +345,12 @@ def fix_ownership(path, current_user):
         if get_owner(path) != os.getuid():
             print(f"🛠️ Changing ownership: {path}")
             
-            # Make sure we have initialized the sudo session
-            if current_user not in stored_passwords:
-                stored_passwords[current_user] = getpass.getpass(f"Password for {current_user} (for permission changes): ")
+            # Get the password (from keyring or prompt)
+            password = get_password(current_user)
                 
+            # Initialize sudo session if needed
             if not sudo_timestamp_refreshed:
-                print("🔑 Initializing sudo session...")
-                cmd = 'echo "Initializing sudo session"'
-                subprocess.run(["sudo", "-S", "sh", "-c", cmd], 
-                              input=stored_passwords[current_user] + "\n", 
-                              text=True, 
-                              stdout=subprocess.PIPE)
-                sudo_timestamp_refreshed = True
+                refresh_sudo_timestamp(password)
                 
             subprocess.run(["sudo", "chown", "-R", f"{current_user}:staff", path], check=True)
             print(f"✅ Ownership fixed: {path}")
@@ -366,8 +463,11 @@ def process_files_and_folders(root_dir):
         logged_in_user = subprocess.run(["stat", "-f%Su", "/dev/console"], capture_output=True, text=True).stdout.strip()
         print(f"🍎 Running on macOS - Full fixes including permissions, ownership and locks")
         
-        # We'll ask for password only if needed during processing
-        # No need to ask upfront
+        if not KEYRING_AVAILABLE:
+            print("⚠️ Keyring package not available. Passwords will only be stored for this session.")
+            print("   Install keyring for persistent password storage: pip install keyring")
+        else:
+            print("✅ Using keyring for secure password storage")
             
     elif IS_SYNOLOGY:
         print(f"📦 Running on Synology NAS - Limited to filename fixes only")
@@ -437,6 +537,20 @@ if __name__ == "__main__":
     # Check if we're being asked to verify the environment
     if len(sys.argv) > 1 and sys.argv[1] == "--check-env":
         check_environment()
+        sys.exit(0)
+    
+    # Check if we're being asked to forget stored credentials
+    if len(sys.argv) > 1 and sys.argv[1] == "--forget-credentials":
+        if KEYRING_AVAILABLE:
+            current_user = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip()
+            try:
+                keyring.delete_password("smbfix", current_user)
+                print(f"✅ Removed stored credentials for {current_user}")
+            except:
+                print(f"⚠️ No stored credentials found for {current_user}")
+        else:
+            print("⚠️ Keyring package not available. Cannot manage stored credentials.")
+            print("   Install keyring for credential management: pip install keyring")
         sys.exit(0)
         
     root_dir = sys.argv[1] if len(sys.argv) > 1 else '.'
