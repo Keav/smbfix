@@ -7,6 +7,7 @@ import platform
 import json
 from pathlib import Path
 import base64
+import shutil
 
 # Define invalid SMB characters
 PROBLEM_CHAR_REGEX = re.compile(r"[\x00-\x1F\x7F\uE000-\uF8FF\u0300-\u036F]")
@@ -315,6 +316,10 @@ def should_exclude(path):
     """Exclude iPhoto Library and .abbu files/folders."""
     return "iPhoto Library" in path or ".abbu/" in path or path.lower().endswith(".abbu") or ".photoslibrary/" in path or path.lower().endswith(".photoslibrary")
 
+def is_rtfd_bundle(path):
+    """Check if the path is an RTFD bundle."""
+    return path.lower().endswith('.rtfd') and os.path.isdir(path)
+
 def is_locked(path):
     """Check if a file or folder is locked. Only applicable for macOS."""
     if not IS_MACOS:
@@ -437,7 +442,12 @@ def rename_if_needed(path, rename_list):
         new_path = os.path.join(dirpath, f"{base}_{counter}{ext}")
         counter += 1
 
-    rename_list.append((path, new_path))
+    # For RTFD bundles, flag them for special handling
+    if is_rtfd_bundle(path):
+        rename_list.append((path, new_path, True))  # Third parameter indicates RTFD
+    else:
+        rename_list.append((path, new_path, False))  # Regular file/folder
+        
     return new_path
 
 # ------------------ MAIN PROCESSING ------------------ #
@@ -544,9 +554,10 @@ def process_files_and_folders(root_dir):
     rename_list.sort(key=lambda x: x[0].count(os.sep), reverse=True)
 
     print("\n⚠️ The following files/folders will be renamed:\n")
-    for old_path, new_path in rename_list:
+    for old_path, new_path, is_rtfd in rename_list:
         # Using colorful output and bold arrow for better visibility
-        print(f"  - \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
+        rtfd_marker = " [RTFD Bundle]" if is_rtfd else ""
+        print(f"  - \033[33m{old_path}{rtfd_marker}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
 
     response = input("\n🔄 Apply all renames? (yes/no): ").strip().lower()
     if response not in ["yes", "y"]:
@@ -554,10 +565,34 @@ def process_files_and_folders(root_dir):
         return
 
     # Perform renames in the sorted order (deepest paths first)
-    for old_path, new_path in rename_list:
+    for old_path, new_path, is_rtfd in rename_list:
         try:
-            os.rename(old_path, new_path)
-            print(f"✅ Renamed: \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
+            if is_rtfd:
+                # Special handling for RTFD bundles
+                if os.path.exists(new_path):
+                    print(f"⚠️ Destination already exists, using alternative name for: {old_path}")
+                    # Find another name if the destination exists
+                    counter = 1
+                    base_path, ext = os.path.splitext(new_path)
+                    while os.path.exists(new_path):
+                        new_path = f"{base_path}_{counter}{ext}"
+                        counter += 1
+                
+                print(f"🔄 Copying RTFD bundle: {old_path} -> {new_path}")
+                # Use copytree to copy the entire directory structure
+                shutil.copytree(old_path, new_path)
+                
+                # Check if copy was successful before removing original
+                if os.path.exists(new_path) and os.path.isdir(new_path):
+                    # Use rm -rf for more reliable removal of RTFD bundles
+                    subprocess.run(["rm", "-rf", old_path], check=True)
+                    print(f"✅ Renamed RTFD: \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
+                else:
+                    print(f"❌ Failed to create destination for RTFD: {new_path}")
+            else:
+                # Standard rename for regular files and folders
+                os.rename(old_path, new_path)
+                print(f"✅ Renamed: \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
         except Exception as e:
             print(f"❌ Error renaming {old_path}: {e}")
 
