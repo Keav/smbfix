@@ -254,16 +254,36 @@ def clean_filename(entry):
     
     # Handle periods in non-hidden files consistently across platforms
     if not base_name.startswith('.'):  # Skip period handling for hidden files
-        # Replace sequences of periods with single period FIRST
-        base_name = re.sub(r'\.{2,}', '.', base_name)
+        # Special handling for consecutive dots - be more explicit about the pattern
+        # Replace 2 or more consecutive dots with a single dot, but only if not at the end
+        # This prevents "file.." from becoming "file." which would then become "file-"
+        base_name = re.sub(r'\.{2,}(?=\w)', '.', base_name)  # Only replace if followed by word character
+        base_name = re.sub(r'\.{2,}(?=\s)', '.', base_name)  # Only replace if followed by space
+        
+        # Handle remaining consecutive dots (like "file..eml" -> "file.eml")
+        # Split on extension boundary and handle dots in base name only
+        if '.' in base_name:
+            # Find the last meaningful dot (before potential extension in base_name)
+            parts = base_name.split('.')
+            if len(parts) > 1:
+                # Rejoin with single dots, but handle consecutive dots at boundaries
+                cleaned_parts = []
+                for i, part in enumerate(parts):
+                    if part or i == 0 or i == len(parts) - 1:  # Keep non-empty parts and boundary parts
+                        cleaned_parts.append(part)
+                base_name = '.'.join(cleaned_parts)
         
         # Then handle spaces around periods
         base_name = re.sub(r' \.$', '', base_name)  # Remove space + period at end
         base_name = re.sub(r' \.', '.', base_name)  # Fix space before period
     
-    # AFTER period sequence handling, check for trailing periods
-    if base_name.endswith('.'):
-        base_name = base_name[:-1] + '-'  # Replace trailing period with dash
+    # Check for trailing periods ONLY if they're not part of a valid extension pattern
+    # Don't replace trailing periods if we have a valid extension coming
+    if base_name.endswith('.') and not ext:
+        base_name = base_name[:-1] + '-'  # Replace trailing period with dash only if no extension
+    elif base_name.endswith('.') and ext:
+        # If we have an extension, remove the trailing period from base_name
+        base_name = base_name[:-1]
     
     # Handle empty name after cleaning
     if not base_name and ext:
@@ -295,7 +315,7 @@ def clean_filename(entry):
                            "\u00A0" in entry or
                            is_reserved_name(entry) or
                            re.search(r'\.{2,}', entry) or
-                           entry.endswith('.') or
+                           (entry.endswith('.') and not os.path.splitext(entry)[1]) or  # Only flag trailing dots without extensions
                            ' .' in entry)
         
         if still_has_issues:
