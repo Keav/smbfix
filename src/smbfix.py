@@ -249,22 +249,21 @@ def clean_filename(entry):
     # Handle file extension separately to ensure proper cleanup
     base_name, ext = os.path.splitext(entry)
     
-    # Special handling for files like "April ....doc" to avoid "April .doc"
-    # First normalize spaces
+    # Normalize spaces first
     base_name = re.sub(r'\s+', ' ', base_name).strip()
     
-    # SPECIAL HANDLING: Check for trailing periods in base_name regardless of hidden status
-    if base_name.endswith('.'):
-        # Replace trailing period with dash for ALL files including hidden ones
-        base_name = base_name[:-1] + '-'
-    
-    # General period handling for non-hidden files
-    if not base_name.startswith('.'):  # Skip some period handling for hidden files
-        # Replace sequences of periods with single period
+    # Handle periods in non-hidden files consistently across platforms
+    if not base_name.startswith('.'):  # Skip period handling for hidden files
+        # Replace sequences of periods with single period FIRST
         base_name = re.sub(r'\.{2,}', '.', base_name)
-        # Remove spaces before periods
-        base_name = re.sub(r' \.$', '.', base_name)
-        base_name = re.sub(r' \.', '.', base_name)
+        
+        # Then handle spaces around periods
+        base_name = re.sub(r' \.$', '', base_name)  # Remove space + period at end
+        base_name = re.sub(r' \.', '.', base_name)  # Fix space before period
+    
+    # AFTER period sequence handling, check for trailing periods
+    if base_name.endswith('.'):
+        base_name = base_name[:-1] + '-'  # Replace trailing period with dash
     
     # Handle empty name after cleaning
     if not base_name and ext:
@@ -277,16 +276,11 @@ def clean_filename(entry):
     # Ensure no spaces before extension
     entry = base_name + ext
     
-    # Final SMB-compatibility check
-    # Remove any remaining spaces before extension that might have been missed
+    # Remove any remaining spaces before extension
     entry = re.sub(r' (\.[a-zA-Z0-9]+)$', r'\1', entry)
     
     # Final cleanup pass
-    entry = entry.strip()  # No leading/trailing spaces in final result
-    
-    # Trailing period check as final step (catches any trailing periods added during processing)
-    if entry.endswith('.') and not entry == '.':
-        entry = entry[:-1] + '-'
+    entry = entry.strip()
     
     # Handle Windows reserved names by appending an underscore
     if is_reserved_name(entry):
