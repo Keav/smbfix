@@ -239,7 +239,8 @@ def clean_filename(entry):
                          ' .' in entry or
                          re.search(r'-\.[a-zA-Z0-9]+$', entry) or  # Check for hyphen before extension
                          entry.endswith('-') or  # Check for trailing hyphens
-                         re.search(r'[^a-zA-Z0-9)]$', entry))  # Check for trailing special chars (excluding closing parentheses)
+                         re.search(r'[^a-zA-Z0-9)]$', entry) or  # Check for trailing special chars (excluding closing parentheses)
+                         entry.startswith('-'))  # Check for leading hyphens specifically
     
     if not has_invalid_chars:
         return entry  # Return unchanged if already valid
@@ -248,14 +249,29 @@ def clean_filename(entry):
     entry = entry.replace("\u00A0", " ")  # Replace non-breaking spaces
     
     # Smart replacement of invalid characters to avoid creating trailing issues
-    # First, replace invalid SMB characters and problematic Unicode characters
+    # Handle leading asterisk specially - replace with underscore to preserve sorting intent
+    if entry.startswith('*'):
+        entry = '_' + entry[1:]  # Replace leading * with _ to preserve "sort to top" behavior
+        print(f"🔧 Replaced leading asterisk with underscore to preserve sorting in '{original_entry}'")
+    
+    # Replace all remaining invalid SMB characters and problematic Unicode characters with hyphens
     entry = INVALID_CHARACTERS.sub('-', entry)
     entry = PROBLEM_CHAR_REGEX.sub("-", entry)
     
     # Collapse multiple consecutive hyphens into a single hyphen
     entry = re.sub(r'-{2,}', '-', entry)
     
-    # Now check if we've created trailing special characters and adjust
+    # Remove hyphens immediately before file extensions (e.g., "file-.pdf" -> "file.pdf")
+    # Also remove spaces before hyphens before extensions (e.g., "file -.pdf" -> "file.pdf")
+    entry = re.sub(r'\s*-(\.[a-zA-Z0-9]+)$', r'\1', entry)
+    
+    # Remove leading special characters to ensure names start with alphanumeric characters or valid SMB chars
+    # Only remove problematic leading characters like hyphens and spaces, but preserve periods (for hidden files)
+    original_for_leading = entry
+    entry = re.sub(r'^[-\s]+', '', entry)  # Remove leading hyphens and spaces only, preserve periods
+    if entry != original_for_leading:
+        print(f"🔧 Removed problematic leading character(s) from '{original_for_leading}' -> '{entry}'")
+    
     # Remove any trailing hyphens that were just created from invalid character replacement
     if entry.endswith('-') and not original_entry.endswith('-'):
         # We created a trailing hyphen from replacement, remove it
@@ -294,18 +310,8 @@ def clean_filename(entry):
         base_name = re.sub(r' \.', '.', base_name)  # Fix space before period
     
     # Comprehensive trailing special character cleanup
-    # Remove all trailing special characters (periods, hyphens, underscores, spaces, etc.)
-    # but preserve meaningful content and closing parentheses
-    if base_name and not base_name.startswith('.'):  # Skip for hidden files
-        original_base = base_name
-        # Remove all trailing non-alphanumeric characters except closing parentheses
-        base_name = re.sub(r'[^a-zA-Z0-9)]+$', '', base_name)
-        
-        if base_name != original_base:
-            if ext:
-                print(f"🔧 Removing trailing special character(s) from file '{entry}': '{original_base}' -> '{base_name}'")
-            else:
-                print(f"🔧 Removing trailing special character(s) from folder/file '{entry}': '{original_base}' -> '{base_name}'")
+    # Remove all trailing non-alphanumeric characters except closing parentheses
+    base_name = re.sub(r'[^a-zA-Z0-9)]+$', '', base_name)
     
     # Check for trailing periods ONLY if they're not part of a valid extension pattern
     # (This check should now be redundant due to the comprehensive cleanup above, but kept for safety)
@@ -327,23 +333,26 @@ def clean_filename(entry):
             print(f"🔧 Removing trailing hyphen(s) from folder/file '{entry}': '{original_base}' -> '{base_name}'")
         # base_name = base_name[:-1]  # Remove trailing hyphen
     
-    # Make sure we've fixed ALL issues by recursively cleaning
-    # if the name has changed and might still have issues
-    if entry != original_entry:
-        # Check if there are still issues to fix
-        still_has_issues = (INVALID_CHARACTERS.search(entry) or 
-                           PROBLEM_CHAR_REGEX.search(entry) or 
-                           "\u00A0" in entry or
-                           is_reserved_name(entry) or
-                           re.search(r'\.{2,}', entry) or
-                           (entry.endswith('.') and not os.path.splitext(entry)[1]) or  # Only flag trailing dots without extensions
-                           ' .' in entry or
-                           re.search(r'-\.[a-zA-Z0-9]+$', entry) or  # Check for remaining hyphen before extension
-                           re.search(r'[^a-zA-Z0-9)]$', entry))  # Check for remaining trailing special chars (excluding closing parentheses)
-        
-        if still_has_issues:
-            print(f"🔄 Multiple issues detected in '{original_entry}', performing additional cleaning")
-            entry = clean_filename(entry)  # Recursive call to fix remaining issues
+    # Handle empty name after cleaning
+    if not base_name and ext:
+        print(f"⚠️ Warning: Filename '{original_entry}' became empty after cleaning, using 'file' as base name")
+        base_name = "file"
+    elif not base_name:
+        print(f"⚠️ Warning: Filename '{original_entry}' became empty after cleaning, using 'unnamed_file' instead")
+        return "unnamed_file"
+    
+    # Ensure no spaces before extension
+    entry = base_name + ext
+    
+    # Remove any remaining spaces before extension
+    entry = re.sub(r' (\.[a-zA-Z0-9]+)$', r'\1', entry)
+    
+    # Final cleanup pass
+    entry = entry.strip()
+    
+    # Handle Windows reserved names by appending an underscore
+    if is_reserved_name(entry):
+        entry = entry + "_"
     
     return entry
 
@@ -356,7 +365,8 @@ def should_exclude(path):
             path.lower().endswith(".abbu") or 
             ".photoslibrary/" in path or 
             path.lower().endswith(".photoslibrary") or
-            "/@eaDir/" in path or  # Exclude Synology extended attributes directory
+            "/@eaDir/" in path or  # Exclude Synology extended attributes directory with leading slash
+            "@eaDir" in os.path.basename(path) or  # Exclude @eaDir folder name directly
             path.endswith("@SynoEAStream"))  # Exclude Synology extended attribute files
 
 def is_rtfd_bundle(path):
@@ -461,6 +471,10 @@ def fix_permissions(path):
 
 def rename_if_needed(path, rename_list):
     """Check for invalid characters in file/folder name and store changes for bulk confirmation."""
+    # Check exclusions first - don't process system files at all
+    if should_exclude(path):
+        return path
+        
     dirpath, name = os.path.split(path)
     
     # Skip empty names (shouldn't happen but just in case)
@@ -480,9 +494,15 @@ def rename_if_needed(path, rename_list):
 
     # Ensure the new name does not already exist
     counter = 1
+    original_new_name = new_name
     while os.path.exists(new_path):
-        base, ext = os.path.splitext(new_name)
-        new_path = os.path.join(dirpath, f"{base}_{counter}{ext}")
+        base, ext = os.path.splitext(original_new_name)
+        # Handle case where base name is empty (like ".pdf" -> "1.pdf", "2.pdf", etc.)
+        if not base:
+            new_name = f"{counter}{ext}"
+        else:
+            new_name = f"{base}_{counter}{ext}"
+        new_path = os.path.join(dirpath, new_name)
         counter += 1
 
     # For RTFD bundles, flag them for special handling
