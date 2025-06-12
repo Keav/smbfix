@@ -359,7 +359,7 @@ def clean_filename(entry):
 # ------------------ FILE & FOLDER CHECKS ------------------ #
 
 def should_exclude(path):
-    """Exclude iPhoto Library, .abbu files/folders, and Synology system files."""
+    """Exclude iPhoto Library, .abbu files/folders, Synology system files, and mail archives."""
     return ("iPhoto Library" in path or 
             ".abbu/" in path or 
             path.lower().endswith(".abbu") or 
@@ -367,7 +367,9 @@ def should_exclude(path):
             path.lower().endswith(".photoslibrary") or
             "/@eaDir/" in path or  # Exclude Synology extended attributes directory with leading slash
             "@eaDir" in os.path.basename(path) or  # Exclude @eaDir folder name directly
-            path.endswith("@SynoEAStream"))  # Exclude Synology extended attribute files
+            path.endswith("@SynoEAStream") or  # Exclude Synology extended attribute files
+            ".mbox/" in path or  # Exclude mail archive contents
+            path.lower().endswith(".mbox"))  # Exclude mail archive files
 
 def is_rtfd_bundle(path):
     """Check if the path is an RTFD bundle."""
