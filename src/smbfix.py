@@ -628,8 +628,13 @@ def process_files_and_folders(root_dir):
         return
 
     # Perform renames in the sorted order (deepest paths first)
-    for old_path, new_path, is_rtfd in rename_list:
+    for i, (old_path, new_path, is_rtfd) in enumerate(rename_list):
         try:
+            # Check if the source path still exists (may have been invalidated by parent rename)
+            if not os.path.exists(old_path):
+                print(f"⚠️ Skipping {old_path} - path no longer exists (likely parent was renamed)")
+                continue
+                
             if is_rtfd:
                 # Special handling for RTFD bundles
                 if os.path.exists(new_path):
@@ -650,31 +655,46 @@ def process_files_and_folders(root_dir):
                     # Use rm -rf for more reliable removal of RTFD bundles
                     subprocess.run(["rm", "-rf", old_path], check=True)
                     print(f"✅ Renamed RTFD: \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
+                    
+                    # Update child paths if this was a directory rename
+                    update_child_paths(rename_list[i+1:], old_path, new_path)
                 else:
                     print(f"❌ Failed to create destination for RTFD: {new_path}")
             else:
                 # Standard rename for regular files and folders
                 os.rename(old_path, new_path)
                 print(f"✅ Renamed: \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
+                
+                # If this was a directory rename, update all remaining child paths in the list
+                if os.path.isdir(new_path):
+                    update_child_paths(rename_list[i+1:], old_path, new_path)
+                    
         except Exception as e:
             print(f"❌ Error renaming {old_path}: {e}")
 
     print("\n🎉 Done! Check your files.")
 
-if __name__ == "__main__":
-    # Check if we're being asked to verify the environment
-    if len(sys.argv) > 1 and sys.argv[1] == "--check-env":
-        check_environment()
-        sys.exit(0)
+def update_child_paths(rename_list, old_parent_path, new_parent_path):
+    """Update all child paths in the rename list when a parent directory is renamed."""
+    updated_count = 0
+    for i, (old_path, new_path, is_rtfd) in enumerate(rename_list):
+        # Check if this path is a child of the renamed parent
+        if old_path.startswith(old_parent_path + os.sep):
+            # Calculate the relative path from the old parent
+            relative_path = old_path[len(old_parent_path + os.sep):]
+            # Create the new full path
+            updated_old_path = os.path.join(new_parent_path, relative_path)
+            
+            # Update the new_path as well by replacing the parent portion
+            if new_path.startswith(old_parent_path + os.sep):
+                new_relative_path = new_path[len(old_parent_path + os.sep):]
+                updated_new_path = os.path.join(new_parent_path, new_relative_path)
+            else:
+                updated_new_path = new_path
+            
+            # Update the entry in the list
+            rename_list[i] = (updated_old_path, updated_new_path, is_rtfd)
+            updated_count += 1
     
-    # Check if we're being asked to forget stored credentials
-    if len(sys.argv) > 1 and sys.argv[1] == "--forget-credentials":
-        current_user = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip()
-        if forget_credentials(current_user):
-            print(f"✅ Successfully removed stored credentials for {current_user}")
-        else:
-            print(f"⚠️ No stored credentials found for {current_user}")
-        sys.exit(0)
-        
-    root_dir = sys.argv[1] if len(sys.argv) > 1 else '.'
-    process_files_and_folders(root_dir)
+    if updated_count > 0:
+        print(f"🔄 Updated {updated_count} child paths after renaming parent directory")
