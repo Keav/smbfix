@@ -284,6 +284,14 @@ def clean_filename(entry):
     # Normalize spaces first
     base_name = re.sub(r'\s+', ' ', base_name).strip()
     
+    # Check for empty base name after space normalization
+    if not base_name and ext:
+        print(f"⚠️ Warning: Filename '{original_entry}' became empty after cleaning, using 'file' as base name")
+        base_name = "file"
+    elif not base_name:
+        print(f"⚠️ Warning: Filename '{original_entry}' became empty after cleaning, using 'unnamed_file' instead")
+        return "unnamed_file"
+    
     # Handle periods in non-hidden files consistently across platforms
     if not base_name.startswith('.'):  # Skip period handling for hidden files
         # Special handling for consecutive dots - be more explicit about the pattern
@@ -313,7 +321,15 @@ def clean_filename(entry):
     # Remove all trailing non-alphanumeric characters except closing parentheses
     base_name = re.sub(r'[^a-zA-Z0-9)]+$', '', base_name)
     
-    # Check for trailing periods ONLY if they're not part of a valid extension pattern
+    # Check again for empty base name after character cleanup
+    if not base_name and ext:
+        print(f"⚠️ Warning: Filename '{original_entry}' became empty after character cleanup, using 'file' as base name")
+        base_name = "file"
+    elif not base_name:
+        print(f"⚠️ Warning: Filename '{original_entry}' became empty after character cleanup, using 'unnamed_file' instead")
+        return "unnamed_file"
+    
+    # Handle trailing periods ONLY if they're not part of a valid extension pattern
     # (This check should now be redundant due to the comprehensive cleanup above, but kept for safety)
     if base_name.endswith('.') and not ext:
         base_name = base_name[:-1]  # Just remove the period, don't replace with dash
@@ -332,14 +348,6 @@ def clean_filename(entry):
         else:
             print(f"🔧 Removing trailing hyphen(s) from folder/file '{entry}': '{original_base}' -> '{base_name}'")
         # base_name = base_name[:-1]  # Remove trailing hyphen
-    
-    # Handle empty name after cleaning
-    if not base_name and ext:
-        print(f"⚠️ Warning: Filename '{original_entry}' became empty after cleaning, using 'file' as base name")
-        base_name = "file"
-    elif not base_name:
-        print(f"⚠️ Warning: Filename '{original_entry}' became empty after cleaning, using 'unnamed_file' instead")
-        return "unnamed_file"
     
     # Ensure no spaces before extension
     entry = base_name + ext
@@ -689,12 +697,23 @@ def process_files_and_folders(root_dir):
                     print(f"❌ Failed to create destination for RTFD: {new_path}")
             else:
                 # Standard rename for regular files and folders
-                os.rename(old_path, new_path)
-                print(f"✅ Renamed: \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
+                # Check for destination conflicts again at rename time
+                final_new_path = new_path
+                counter = 1
+                while os.path.exists(final_new_path):
+                    base_path, ext = os.path.splitext(new_path)
+                    final_new_path = f"{base_path}_{counter}{ext}"
+                    counter += 1
+                    
+                if final_new_path != new_path:
+                    print(f"⚠️ Destination conflict detected, using alternative name: {final_new_path}")
+                
+                os.rename(old_path, final_new_path)
+                print(f"✅ Renamed: \033[33m{old_path}\033[0m \033[1;36m==>\033[0m \033[32m{final_new_path}\033[0m")
                 
                 # If this was a directory rename, update all remaining child paths in the list
-                if os.path.isdir(new_path):
-                    update_child_paths(rename_list[i+1:], old_path, new_path)
+                if os.path.isdir(final_new_path):
+                    update_child_paths(rename_list[i+1:], old_path, final_new_path)
                     
         except Exception as e:
             print(f"❌ Error renaming {old_path}: {e}")
