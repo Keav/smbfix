@@ -585,10 +585,23 @@ def process_file(file, current_user, logged_in_user, rename_list):
     if should_exclude(file):
         return
 
+    # Remove Mac aliases on Synology NAS only
+    if IS_SYNOLOGY and is_mac_alias(file):
+        try:
+            os.remove(file)
+            print(f"🗑️ Removed Mac alias (unsupported on NAS): {file}")
+            return  # Don't process further since file is deleted
+        except Exception as e:
+            print(f"⚠️ Failed to remove Mac alias {file}: {e}")
+
     if IS_MACOS:
         unlock_file(file, current_user, logged_in_user)
         fix_ownership(file, current_user)
         fix_permissions(file)
+
+    # Check and fix hidden office documents on both Mac and NAS
+    if should_unhide_office_file(file) and is_file_hidden(file):
+        unhide_office_file(file, current_user)
 
     rename_if_needed(file, rename_list)
 
