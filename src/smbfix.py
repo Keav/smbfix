@@ -14,6 +14,19 @@ PROBLEM_CHAR_REGEX = re.compile(r"[\x00-\x1F\x7F\uE000-\uF8FF\u0300-\u036F]")
 INVALID_CHARACTERS = re.compile(r'[\\/:*?"<>|+\[\]]')  # Keep existing invalid SMB characters
 # Windows reserved names (case-insensitive)
 RESERVED_NAMES = ['CON', 'PRN', 'AUX', 'NUL'] + [f'COM{i}' for i in range(1, 10)] + [f'LPT{i}' for i in range(1, 10)]
+# Define the byte signature of a macOS alias file
+ALIAS_HEADER = b'book\x00\x00\x00\x00mark'
+# Office document file extensions that should not be hidden
+OFFICE_EXTENSIONS = {
+    '.docx', '.doc', '.docm', '.dotx', '.dotm',  # Word documents
+    '.xlsx', '.xls', '.xlsm', '.xltx', '.xltm', '.xlsb',  # Excel documents
+    '.pptx', '.ppt', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm',  # PowerPoint documents
+    '.pdf',  # PDF documents
+    '.rtf',  # Rich Text Format
+    '.odt', '.ods', '.odp', '.odg',  # LibreOffice/OpenOffice documents
+    '.pages', '.numbers', '.key',  # Apple iWork documents
+    '.txt', '.csv'  # Text and data files
+}
 stored_passwords = {}
 sudo_timestamp_refreshed = False  # Track if we've refreshed the sudo timestamp
 
@@ -219,6 +232,70 @@ def is_mac_alias(filepath):
             header = f.read(16)
             return header.startswith(ALIAS_HEADER)
     except Exception:
+        return False
+
+def is_file_hidden(filepath):
+    """Check if a file has the hidden flag set."""
+    try:
+        if IS_MACOS:
+            result = subprocess.run(['ls', '-lO', filepath], 
+                                  capture_output=True, text=True)
+            return 'hidden' in result.stdout
+        else:
+            # On other systems (including Synology), use stat to check for hidden flag
+            result = subprocess.run(['stat', '-f', '%Sf', filepath], 
+                                  capture_output=True, text=True)
+            return 'hidden' in result.stdout.lower()
+    except:
+        return False
+
+def should_unhide_office_file(filepath):
+    """Check if an office file should be unhidden (not a temp file or already hidden by name)."""
+    filename = os.path.basename(filepath)
+    file_ext = os.path.splitext(filename)[1].lower()
+    
+    # Check if it's an office file type
+    if file_ext not in OFFICE_EXTENSIONS:
+        return False
+    
+    # Don't unhide files that start with . (legitimately hidden)
+    if filename.startswith('.'):
+        return False
+    
+    # Don't unhide temporary files (starting with ~$ for Office temp files)
+    if filename.startswith('~$'):
+        return False
+    
+    return True
+
+def unhide_office_file(filepath, current_user):
+    """Remove the hidden flag from an office document file."""
+    global sudo_timestamp_refreshed
+    
+    try:
+        if IS_MACOS:
+            # Get the password (from keyring or prompt)
+            password = get_password(current_user)
+                
+            # Initialize sudo session if needed
+            if not sudo_timestamp_refreshed:
+                refresh_sudo_timestamp(password)
+
+            result = subprocess.run(['sudo', 'chflags', 'nohidden', filepath], 
+                                  capture_output=True, text=True)
+        else:
+            # On Synology/other systems, try chflags without sudo first
+            result = subprocess.run(['chflags', 'nohidden', filepath], 
+                                  capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            print(f"👁️ Unhid office document: {filepath}")
+            return True
+        else:
+            print(f"⚠️ Failed to unhide office document {filepath}: {result.stderr}")
+            return False
+    except Exception as e:
+        print(f"⚠️ Error unhiding office document {filepath}: {e}")
         return False
 
 def is_reserved_name(name):
