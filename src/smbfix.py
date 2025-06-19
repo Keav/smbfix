@@ -242,10 +242,14 @@ def is_file_hidden(filepath):
                                   capture_output=True, text=True)
             return 'hidden' in result.stdout
         else:
-            # On other systems (including Synology), use stat to check for hidden flag
-            result = subprocess.run(['stat', '-f', '%Sf', filepath], 
+            # On other systems (including Synology), check if chflags command exists and file is hidden
+            result = subprocess.run(['ls', '-lO', filepath], 
                                   capture_output=True, text=True)
-            return 'hidden' in result.stdout.lower()
+            if result.returncode == 0:
+                return 'hidden' in result.stdout
+            else:
+                # Fallback: assume not hidden if we can't check
+                return False
     except:
         return False
 
