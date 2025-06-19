@@ -13,7 +13,7 @@ import shutil
 PROBLEM_CHAR_REGEX = re.compile(r"[\x00-\x1F\x7F\uE000-\uF8FF\u0300-\u036F]")
 INVALID_CHARACTERS = re.compile(r'[\\/:*?"<>|+\[\]]')  # Keep existing invalid SMB characters
 # Windows reserved names (case-insensitive)
-RESERVED_NAMES = ['CON', 'PRN', 'AUX', 'NUL'] + [f'COM{i}' for i in range(1, 10)] + [f'LPT{i}' for i in range(1, 10)]
+RESERVED_NAMES = ['CON', 'PRN', 'AUX', 'NUL'] + [f'COM{i}' for i in range(1, 100)] + [f'LPT{i}' for i in range(1, 100)]
 # Define the byte signature of a macOS alias file
 ALIAS_HEADER = b'book\x00\x00\x00\x00mark'
 # Office document file extensions that should not be hidden
@@ -26,6 +26,10 @@ OFFICE_EXTENSIONS = {
     '.odt', '.ods', '.odp', '.odg',  # LibreOffice/OpenOffice documents
     '.pages', '.numbers', '.key',  # Apple iWork documents
     '.txt', '.csv'  # Text and data files
+    '.epub', '.mobi'  # E-book formats
+    '.wps'  # Microsoft Works/WPS Office
+    '.oxps', '.xps'  # XML Paper Specification
+    '.visio', '.vsd', '.vsdx'  # Visio diagrams
 }
 stored_passwords = {}
 sudo_timestamp_refreshed = False  # Track if we've refreshed the sudo timestamp
@@ -322,11 +326,15 @@ def clean_filename(entry):
                          "\u00A0" in entry or
                          is_reserved_name(entry) or
                          re.search(r'\.{2,}', entry) or
+                         re.search(r'-{2,}', entry) or  # Check for multiple consecutive hyphens
+                         re.search(r'[\u2013\u2014\u2015]{2,}', entry) or  # Check for multiple Unicode dashes
                          entry.endswith('.') or  # This check catches trailing periods
                          entry.endswith(' ') or  # Check for trailing spaces
                          entry.startswith(' ') or # Check for leading spaces
                          re.search(r'\s{2,}', entry) or  # Check for multiple consecutive spaces
+                         re.search(r'[\s\t\u00A0\u2000-\u200B\u2028\u2029]{2,}', entry) or  # Check for mixed whitespace
                          ' .' in entry or
+                         re.search(r'-{2,}\.[a-zA-Z0-9]+$', entry) or  # Check for multiple hyphens before extension
                          re.search(r'-\.[a-zA-Z0-9]+$', entry) or  # Check for hyphen before extension
                          entry.endswith('-') or  # Check for trailing hyphens
                          re.search(r'[^a-zA-Z0-9)]$', entry) or  # Check for trailing special chars (excluding closing parentheses)
@@ -348,10 +356,15 @@ def clean_filename(entry):
     entry = INVALID_CHARACTERS.sub('-', entry)
     entry = PROBLEM_CHAR_REGEX.sub("-", entry)
     
+    # Replace Unicode dashes with regular hyphens
+    entry = re.sub(r'[\u2013\u2014\u2015]', '-', entry)
+    
     # Collapse multiple consecutive hyphens into a single hyphen
     entry = re.sub(r'-{2,}', '-', entry)
     
-    # Remove hyphens immediately before file extensions (e.g., "file-.pdf" -> "file.pdf")
+    # Remove multiple hyphens immediately before file extensions
+    entry = re.sub(r'-{2,}(\.[a-zA-Z0-9]+)$', r'\1', entry)
+    # Remove single hyphen immediately before file extensions (e.g., "file-.pdf" -> "file.pdf")
     # Also remove spaces before hyphens before extensions (e.g., "file -.pdf" -> "file.pdf")
     entry = re.sub(r'\s*-(\.[a-zA-Z0-9]+)$', r'\1', entry)
     
@@ -371,8 +384,8 @@ def clean_filename(entry):
     # Handle file extension separately to ensure proper cleanup
     base_name, ext = os.path.splitext(entry)
     
-    # Normalize spaces first
-    base_name = re.sub(r'\s+', ' ', base_name).strip()
+    # Normalize spaces first - handle all types of whitespace
+    base_name = re.sub(r'[\s\t\u00A0\u2000-\u200B\u2028\u2029]+', ' ', base_name).strip()
     
     # Check for empty base name after space normalization
     if not base_name and ext:
@@ -626,7 +639,7 @@ def check_alias_removal(path, rename_list):
 def update_child_paths(rename_list, old_parent_path, new_parent_path):
     """Update all child paths in the rename list when a parent directory is renamed."""
     updated_count = 0
-    for i, (old_path, new_path, is_rtfd) in enumerate(rename_list):
+    for i, (old_path, new_path, is_rtfd, operation) in enumerate(rename_list):
         # Check if this path is a child of the renamed parent
         if old_path.startswith(old_parent_path + os.sep):
             # Calculate the relative path from the old parent
@@ -635,14 +648,14 @@ def update_child_paths(rename_list, old_parent_path, new_parent_path):
             updated_old_path = os.path.join(new_parent_path, relative_path)
             
             # Update the new_path as well by replacing the parent portion
-            if new_path.startswith(old_parent_path + os.sep):
+            if new_path and new_path.startswith(old_parent_path + os.sep):
                 new_relative_path = new_path[len(old_parent_path + os.sep):]
                 updated_new_path = os.path.join(new_parent_path, new_relative_path)
             else:
                 updated_new_path = new_path
             
             # Update the entry in the list
-            rename_list[i] = (updated_old_path, updated_new_path, is_rtfd)
+            rename_list[i] = (updated_old_path, updated_new_path, is_rtfd, operation)
             updated_count += 1
     
     if updated_count > 0:
