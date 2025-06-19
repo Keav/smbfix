@@ -607,11 +607,19 @@ def rename_if_needed(path, rename_list):
 
     # For RTFD bundles, flag them for special handling
     if is_rtfd_bundle(path):
-        rename_list.append((path, new_path, True))  # Third parameter indicates RTFD
+        rename_list.append((path, new_path, True, 'rename'))  # Fourth parameter indicates operation type
     else:
-        rename_list.append((path, new_path, False))  # Regular file/folder
+        rename_list.append((path, new_path, False, 'rename'))  # Regular file/folder rename
         
     return new_path
+
+def check_alias_removal(path, rename_list):
+    """Check if file is a Mac alias and add to removal list for Synology NAS."""
+    if IS_SYNOLOGY and is_mac_alias(path):
+        print(f"🔍 Debug: Mac alias detected for removal: {path}")
+        rename_list.append((path, None, False, 'delete'))  # None for new_path, delete operation
+        return True
+    return False
 
 # ------------------ MAIN PROCESSING ------------------ #
 
@@ -675,14 +683,10 @@ def process_file(file, current_user, logged_in_user, rename_list):
     if should_exclude(file):
         return
 
-    # Remove Mac aliases on Synology NAS only
-    if IS_SYNOLOGY and is_mac_alias(file):
-        try:
-            os.remove(file)
-            print(f"🗑️ Removed Mac alias (unsupported on NAS): {file}")
-            return  # Don't process further since file is deleted
-        except Exception as e:
-            print(f"⚠️ Failed to remove Mac alias {file}: {e}")
+    # Check for Mac aliases on Synology NAS (add to list, don't remove immediately)
+    alias_marked_for_removal = check_alias_removal(file, rename_list)
+    if alias_marked_for_removal:
+        return  # Don't process further since file will be deleted
 
     if IS_MACOS:
         unlock_file(file, current_user, logged_in_user)
@@ -754,26 +758,33 @@ def process_files_and_folders(root_dir):
     # This ensures we rename child items before their parent folders
     rename_list.sort(key=lambda x: x[0].count(os.sep), reverse=True)
 
-    print("\n⚠️ The following files/folders will be renamed:\n")
-    for old_path, new_path, is_rtfd in rename_list:
-        # Using colorful output and bold arrow for better visibility
-        rtfd_marker = " [RTFD Bundle]" if is_rtfd else ""
-        print(f"  - \033[33m{old_path}{rtfd_marker}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
+    print("\n⚠️ The following files/folders will be renamed or removed:\n")
+    for old_path, new_path, is_rtfd, operation in rename_list:
+        if operation == 'delete':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE ALIAS]\033[0m")
+        else:
+            # Using colorful output and bold arrow for better visibility
+            rtfd_marker = " [RTFD Bundle]" if is_rtfd else ""
+            print(f"  - \033[33m{old_path}{rtfd_marker}\033[0m \033[1;36m==>\033[0m \033[32m{new_path}\033[0m")
 
-    response = input("\n🔄 Apply all renames? (yes/no): ").strip().lower()
+    response = input("\n🔄 Apply all renames and removals? (yes/no): ").strip().lower()
     if response not in ["yes", "y"]:
         print("❌ No changes were made.")
         return
 
-    # Perform renames in the sorted order (deepest paths first)
-    for i, (old_path, new_path, is_rtfd) in enumerate(rename_list):
+    # Perform renames and deletions in the sorted order (deepest paths first)
+    for i, (old_path, new_path, is_rtfd, operation) in enumerate(rename_list):
         try:
             # Check if the source path still exists (may have been invalidated by parent rename)
             if not os.path.exists(old_path):
                 print(f"⚠️ Skipping {old_path} - path no longer exists (likely parent was renamed)")
                 continue
-                
-            if is_rtfd:
+
+            if operation == 'delete':
+                # Handle alias deletion
+                os.remove(old_path)
+                print(f"🗑️ Removed Mac alias: \033[31m{old_path}\033[0m")
+            elif is_rtfd:
                 # Special handling for RTFD bundles
                 if os.path.exists(new_path):
                     print(f"⚠️ Destination already exists, using alternative name for: {old_path}")
@@ -819,7 +830,7 @@ def process_files_and_folders(root_dir):
                     update_child_paths(rename_list[i+1:], old_path, final_new_path)
                     
         except Exception as e:
-            print(f"❌ Error renaming {old_path}: {e}")
+            print(f"❌ Error processing {old_path}: {e}")
 
     print("\n🎉 Done! Check your files.")
 
