@@ -212,6 +212,15 @@ def check_environment():
 
 # ------------------ FILE & FOLDER CLEANUP FUNCTIONS ------------------ #
 
+def is_mac_alias(filepath):
+    """Check if a file is a macOS alias by examining its header."""
+    try:
+        with open(filepath, 'rb') as f:
+            header = f.read(16)
+            return header.startswith(ALIAS_HEADER)
+    except Exception:
+        return False
+
 def is_reserved_name(name):
     """Check if a name is a Windows reserved name (ignoring extension)."""
     basename = os.path.splitext(name)[0]
