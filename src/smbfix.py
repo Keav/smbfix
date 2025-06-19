@@ -634,6 +634,32 @@ def check_alias_removal(path, rename_list):
         return True
     return False
 
+def is_mac_icon_file(filepath):
+    """Check if a file is a macOS custom folder icon file."""
+    filename = os.path.basename(filepath)
+    
+    # Check for various forms of Icon files (after character replacement)
+    if filename.startswith('Icon') and len(filename) <= 10:
+        # Must have no file extension or only special characters after "Icon"
+        remainder = filename[4:]  # Everything after "Icon"
+        if not remainder or re.match(r'^[-_\s\r\n]*$', remainder):
+            # Check file size - Icon files are typically very small (0-512 bytes)
+            try:
+                file_size = os.path.getsize(filepath)
+                if file_size <= 512:  # 512 bytes or smaller
+                    return True
+            except OSError:
+                pass  # If we can't get size, don't assume it's an Icon file
+    return False
+
+def check_icon_removal(path, rename_list):
+    """Check if file is a Mac Icon file and add to removal list."""
+    if is_mac_icon_file(path):
+        print(f"🔍 Debug: Mac Icon file detected for removal: {path}")
+        rename_list.append((path, None, False, 'delete_icon'))
+        return True
+    return False
+
 # ------------------ MAIN PROCESSING ------------------ #
 
 def update_child_paths(rename_list, old_parent_path, new_parent_path):
@@ -699,6 +725,11 @@ def process_file(file, current_user, logged_in_user, rename_list):
     # Check for Mac aliases on Synology NAS (add to list, don't remove immediately)
     alias_marked_for_removal = check_alias_removal(file, rename_list)
     if alias_marked_for_removal:
+        return  # Don't process further since file will be deleted
+
+    # Check for Mac Icon files (add to list for removal)
+    icon_marked_for_removal = check_icon_removal(file, rename_list)
+    if icon_marked_for_removal:
         return  # Don't process further since file will be deleted
 
     if IS_MACOS:
@@ -775,6 +806,8 @@ def process_files_and_folders(root_dir):
     for old_path, new_path, is_rtfd, operation in rename_list:
         if operation == 'delete':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE ALIAS]\033[0m")
+        elif operation == 'delete_icon':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE ICON]\033[0m")
         else:
             # Using colorful output and bold arrow for better visibility
             rtfd_marker = " [RTFD Bundle]" if is_rtfd else ""
@@ -797,6 +830,10 @@ def process_files_and_folders(root_dir):
                 # Handle alias deletion
                 os.remove(old_path)
                 print(f"🗑️ Removed Mac alias: \033[31m{old_path}\033[0m")
+            elif operation == 'delete_icon':
+                # Handle Icon file deletion
+                os.remove(old_path)
+                print(f"🗑️ Removed Mac Icon file: \033[31m{old_path}\033[0m")
             elif is_rtfd:
                 # Special handling for RTFD bundles
                 if os.path.exists(new_path):
