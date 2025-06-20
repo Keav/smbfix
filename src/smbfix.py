@@ -238,74 +238,6 @@ def is_mac_alias(filepath):
     except Exception:
         return False
 
-def is_file_hidden(filepath):
-    """Check if a file has the hidden flag set."""
-    try:
-        if IS_MACOS:
-            result = subprocess.run(['ls', '-lO', filepath], 
-                                  capture_output=True, text=True)
-            return 'hidden' in result.stdout
-        else:
-            # On other systems (including Synology), check if chflags command exists and file is hidden
-            result = subprocess.run(['ls', '-lO', filepath], 
-                                  capture_output=True, text=True)
-            if result.returncode == 0:
-                return 'hidden' in result.stdout
-            else:
-                # Fallback: assume not hidden if we can't check
-                return False
-    except:
-        return False
-
-def should_unhide_office_file(filepath):
-    """Check if an office file should be unhidden (not a temp file or already hidden by name)."""
-    filename = os.path.basename(filepath)
-    file_ext = os.path.splitext(filename)[1].lower()
-    
-    # Check if it's an office file type
-    if file_ext not in OFFICE_EXTENSIONS:
-        return False
-    
-    # Don't unhide files that start with . (legitimately hidden)
-    if filename.startswith('.'):
-        return False
-    
-    # Don't unhide temporary files (starting with ~$ for Office temp files)
-    if filename.startswith('~$'):
-        return False
-    
-    return True
-
-def unhide_office_file(filepath, current_user):
-    """Remove the hidden flag from an office document file."""
-    global sudo_timestamp_refreshed
-    
-    try:
-        if IS_MACOS:
-            # Get the password (from keyring or prompt)
-            password = get_password(current_user)
-                
-            # Initialize sudo session if needed
-            if not sudo_timestamp_refreshed:
-                refresh_sudo_timestamp(password)
-
-            result = subprocess.run(['sudo', 'chflags', 'nohidden', filepath], 
-                                  capture_output=True, text=True)
-        else:
-            # On Synology/other systems, try chflags without sudo first
-            result = subprocess.run(['chflags', 'nohidden', filepath], 
-                                  capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print(f"👁️ Unhid office document: {filepath}")
-            return True
-        else:
-            print(f"⚠️ Failed to unhide office document {filepath}: {result.stderr}")
-            return False
-    except Exception as e:
-        print(f"⚠️ Error unhiding office document {filepath}: {e}")
-        return False
-
 def is_reserved_name(name):
     """Check if a name is a Windows reserved name (ignoring extension)."""
     basename = os.path.splitext(name)[0]
@@ -736,10 +668,6 @@ def process_file(file, current_user, logged_in_user, rename_list):
         unlock_file(file, current_user, logged_in_user)
         fix_ownership(file, current_user)
         fix_permissions(file)
-
-    # Check and fix hidden office documents on both Mac and NAS
-    if should_unhide_office_file(file) and is_file_hidden(file):
-        unhide_office_file(file, current_user)
 
     rename_if_needed(file, rename_list)
 
