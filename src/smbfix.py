@@ -137,15 +137,19 @@ def get_password(username, prompt_message=None):
     stored_passwords[username] = password
     return password
 
-def refresh_sudo_timestamp(password):
-    """Initialize sudo session to avoid repeated password prompts during script execution."""
+def refresh_sudo_timestamp(password, force_refresh=False):
+    """Initialize/refresh sudo session to avoid repeated password prompts during script execution."""
     global sudo_timestamp_refreshed
     
-    if sudo_timestamp_refreshed:
+    if sudo_timestamp_refreshed and not force_refresh:
         return True
     
-    print("🔑 Initializing sudo session...")
-    cmd = 'echo "Initializing sudo session"'
+    if force_refresh:
+        print("� Refreshing sudo session...")
+    else:
+        print("�🔑 Initializing sudo session...")
+    
+    cmd = 'echo "Sudo session active"'
     result = subprocess.run(
         ["sudo", "-S", "sh", "-c", cmd],
         input=password + "\n",
@@ -158,8 +162,26 @@ def refresh_sudo_timestamp(password):
         sudo_timestamp_refreshed = True
         return True
     else:
-        print(f"⚠️ Failed to initialize sudo session: {result.stderr}")
+        print(f"⚠️ Failed to refresh sudo session: {result.stderr}")
         return False
+
+def ensure_sudo_session(current_user):
+    """Ensure sudo session is active, refresh if needed."""
+    global sudo_timestamp_refreshed
+    
+    # Test if sudo is still active
+    test_result = subprocess.run(
+        ["sudo", "-n", "echo", "test"],
+        capture_output=True,
+        text=True
+    )
+    
+    if test_result.returncode != 0:
+        # Sudo session expired, refresh it
+        password = get_password(current_user)
+        return refresh_sudo_timestamp(password, force_refresh=True)
+    
+    return True
 
 # ------------------ ENVIRONMENT CHECK ------------------ #
 
@@ -430,20 +452,16 @@ def get_owner(path):
 
 def unlock_file(path, current_user, logged_in_user):
     """Unlock a file only if it is locked, using sudo."""
-    global sudo_timestamp_refreshed
-    
     if not IS_MACOS:
         return False  # Skip for non-macOS systems
         
     if is_locked(path):
         print(f"\n🔓 Unlocking file: {path}")
         
-        # Get the password (from keyring or prompt)
-        password = get_password(current_user)
-            
-        # Initialize sudo session if needed
-        if not sudo_timestamp_refreshed:
-            refresh_sudo_timestamp(password)
+        # Ensure sudo session is active
+        if not ensure_sudo_session(current_user):
+            print(f"❌ Failed to establish sudo session for unlocking: {path}")
+            return False
 
         cmd = f'chflags -R nouchg "{path}"'
         child = subprocess.run(["sudo", "sh", "-c", cmd],
@@ -459,8 +477,6 @@ def unlock_file(path, current_user, logged_in_user):
 
 def fix_ownership(path, current_user):
     """Fix ownership of a file or folder only if incorrect."""
-    global sudo_timestamp_refreshed
-    
     if not IS_MACOS:  # Skip for non-macOS systems
         return
         
@@ -468,12 +484,10 @@ def fix_ownership(path, current_user):
         if get_owner(path) != os.getuid():
             print(f"🛠️ Changing ownership: {path}")
             
-            # Get the password (from keyring or prompt)
-            password = get_password(current_user)
-                
-            # Initialize sudo session if needed
-            if not sudo_timestamp_refreshed:
-                refresh_sudo_timestamp(password)
+            # Ensure sudo session is active
+            if not ensure_sudo_session(current_user):
+                print(f"❌ Failed to establish sudo session for ownership change: {path}")
+                return
                 
             subprocess.run(["sudo", "chown", "-R", f"{current_user}:staff", path], check=True)
             print(f"✅ Ownership fixed: {path}")
@@ -696,6 +710,11 @@ def process_files_and_folders(root_dir):
     try:
         # Apply permissions/ownership fixes to root directory if needed, but don't rename it
         if IS_MACOS:
+            # Initialize sudo session at the start to avoid prompts later
+            password = get_password(current_user)
+            if not refresh_sudo_timestamp(password):
+                print("❌ Failed to initialize sudo session. Some operations may fail.")
+            
             unlock_file(root_dir, current_user, logged_in_user)
             fix_ownership(root_dir, current_user)
             fix_permissions(root_dir)
