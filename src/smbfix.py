@@ -16,21 +16,6 @@ INVALID_CHARACTERS = re.compile(r'[\\/:*?"<>|+\[\]]')  # Keep existing invalid S
 RESERVED_NAMES = ['CON', 'PRN', 'AUX', 'NUL'] + [f'COM{i}' for i in range(1, 100)] + [f'LPT{i}' for i in range(1, 100)]
 # Define the byte signature of a macOS alias file
 ALIAS_HEADER = b'book\x00\x00\x00\x00mark'
-# Office document file extensions that should not be hidden
-OFFICE_EXTENSIONS = {
-    '.docx', '.doc', '.docm', '.dotx', '.dotm',  # Word documents
-    '.xlsx', '.xls', '.xlsm', '.xltx', '.xltm', '.xlsb',  # Excel documents
-    '.pptx', '.ppt', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm',  # PowerPoint documents
-    '.pdf',  # PDF documents
-    '.rtf',  # Rich Text Format
-    '.odt', '.ods', '.odp', '.odg',  # LibreOffice/OpenOffice documents
-    '.pages', '.numbers', '.key',  # Apple iWork documents
-    '.txt', '.csv'  # Text and data files
-    '.epub', '.mobi'  # E-book formats
-    '.wps'  # Microsoft Works/WPS Office
-    '.oxps', '.xps'  # XML Paper Specification
-    '.visio', '.vsd', '.vsdx'  # Visio diagrams
-}
 stored_passwords = {}
 sudo_timestamp_refreshed = False  # Track if we've refreshed the sudo timestamp
 
