@@ -577,6 +577,14 @@ def check_icon_removal(path, rename_list):
         return True
     return False
 
+def check_lnk_removal(path, rename_list):
+    """Check if file is a Windows shortcut (.lnk) and add to removal list."""
+    if path.lower().endswith('.lnk'):
+        print(f"🔍 Debug: Windows shortcut detected for removal: {path}")
+        rename_list.append((path, None, False, 'delete_lnk'))
+        return True
+    return False
+
 # ------------------ MAIN PROCESSING ------------------ #
 
 def update_child_paths(rename_list, old_parent_path, new_parent_path):
@@ -647,6 +655,11 @@ def process_file(file, current_user, logged_in_user, rename_list):
     # Check for Mac Icon files (add to list for removal)
     icon_marked_for_removal = check_icon_removal(file, rename_list)
     if icon_marked_for_removal:
+        return  # Don't process further since file will be deleted
+
+    # Check for Windows shortcuts (add to list for removal)
+    lnk_marked_for_removal = check_lnk_removal(file, rename_list)
+    if lnk_marked_for_removal:
         return  # Don't process further since file will be deleted
 
     if IS_MACOS:
@@ -721,6 +734,8 @@ def process_files_and_folders(root_dir):
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE ALIAS]\033[0m")
         elif operation == 'delete_icon':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE ICON]\033[0m")
+        elif operation == 'delete_lnk':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE SHORTCUT]\033[0m")
         else:
             # Using colorful output and bold arrow for better visibility
             rtfd_marker = " [RTFD Bundle]" if is_rtfd else ""
@@ -747,6 +762,10 @@ def process_files_and_folders(root_dir):
                 # Handle Icon file deletion
                 os.remove(old_path)
                 print(f"🗑️ Removed Mac Icon file: \033[31m{old_path}\033[0m")
+            elif operation == 'delete_lnk':
+                # Handle Windows shortcut deletion
+                os.remove(old_path)
+                print(f"🗑️ Removed Windows shortcut: \033[31m{old_path}\033[0m")
             elif is_rtfd:
                 # Special handling for RTFD bundles
                 if os.path.exists(new_path):
