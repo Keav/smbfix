@@ -24,6 +24,17 @@ sudo_timestamp_refreshed = False  # Track if we've refreshed the sudo timestamp
 IS_MACOS = platform.system() == "Darwin"  
 IS_SYNOLOGY = os.path.exists("/etc/synoinfo.conf")
 
+# Global variable to track disk space saved
+total_space_saved = 0
+
+def format_size(bytes_size):
+    """Convert bytes to human-readable format."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if bytes_size < 1024.0:
+            return f"{bytes_size:.1f} {unit}"
+        bytes_size /= 1024.0
+    return f"{bytes_size:.1f} PB"
+
 # ------------------ CREDENTIAL MANAGEMENT ------------------ #
 
 def get_password_file_path():
@@ -862,7 +873,10 @@ def process_file(file, current_user, logged_in_user, rename_list):
 
 def process_files_and_folders(root_dir):
     """Main function to process all files and folders, preview changes, and apply them in bulk."""
-    global sudo_timestamp_refreshed
+    global sudo_timestamp_refreshed, total_space_saved
+    
+    # Reset space tracking for this run
+    total_space_saved = 0
     
     current_user = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip()
     logged_in_user = ""
@@ -960,50 +974,77 @@ def process_files_and_folders(root_dir):
                 print(f"⚠️ Skipping {old_path} - path no longer exists (likely parent was renamed)")
                 continue
 
+            # Track file/folder size before deletion
+            file_size = 0
+            if operation in ['delete', 'delete_cleanup', 'delete_folder', 'delete_vw_backup', 
+                           'delete_vw_backup_file', 'delete_icon', 'delete_lnk', 'delete_network_trash']:
+                try:
+                    if os.path.isdir(old_path):
+                        # Calculate directory size recursively
+                        for dirpath, dirnames, filenames in os.walk(old_path):
+                            for filename in filenames:
+                                filepath = os.path.join(dirpath, filename)
+                                try:
+                                    file_size += os.path.getsize(filepath)
+                                except (OSError, IOError):
+                                    pass  # Skip files we can't read
+                    else:
+                        file_size = os.path.getsize(old_path)
+                except (OSError, IOError):
+                    file_size = 0  # If we can't get size, don't count it
+
             if operation == 'delete':
                 # Handle alias deletion
                 os.remove(old_path)
-                print(f"🗑️ Removed Mac alias: \033[31m{old_path}\033[0m")
+                total_space_saved += file_size
+                print(f"🗑️ Removed Mac alias: \033[31m{old_path}\033[0m ({format_size(file_size)})")
             elif operation == 'delete_cleanup':
                 # Handle cleanup file deletion
                 if os.path.isdir(old_path):
                     shutil.rmtree(old_path)
-                    print(f"🗑️ Removed cleanup folder: \033[31m{old_path}\033[0m")
+                    print(f"🗑️ Removed cleanup folder: \033[31m{old_path}\033[0m ({format_size(file_size)})")
                 else:
                     os.remove(old_path)
-                    print(f"🗑️ Removed cleanup file: \033[31m{old_path}\033[0m")
+                    print(f"🗑️ Removed cleanup file: \033[31m{old_path}\033[0m ({format_size(file_size)})")
+                total_space_saved += file_size
             elif operation == 'delete_folder':
                 # Handle folder deletion
                 if os.path.isdir(old_path):
                     shutil.rmtree(old_path)
-                    print(f"🗑️ Removed folder: \033[31m{old_path}\033[0m")
+                    print(f"🗑️ Removed folder: \033[31m{old_path}\033[0m ({format_size(file_size)})")
                 else:
                     os.remove(old_path)
-                    print(f"🗑️ Removed file: \033[31m{old_path}\033[0m")
+                    print(f"🗑️ Removed file: \033[31m{old_path}\033[0m ({format_size(file_size)})")
+                total_space_saved += file_size
             elif operation == 'delete_vw_backup':
                 # Handle VW Backup folder deletion
                 if os.path.isdir(old_path):
                     shutil.rmtree(old_path)
-                    print(f"🗑️ Removed VW Backup folder: \033[31m{old_path}\033[0m")
+                    print(f"🗑️ Removed VW Backup folder: \033[31m{old_path}\033[0m ({format_size(file_size)})")
                 else:
                     os.remove(old_path)
-                    print(f"🗑️ Removed VW Backup file: \033[31m{old_path}\033[0m")
+                    print(f"🗑️ Removed VW Backup file: \033[31m{old_path}\033[0m ({format_size(file_size)})")
+                total_space_saved += file_size
             elif operation == 'delete_vw_backup_file':
                 # Handle individual VW Backup file deletion
                 os.remove(old_path)
-                print(f"🗑️ Removed old VW Backup file: \033[31m{old_path}\033[0m")
+                total_space_saved += file_size
+                print(f"🗑️ Removed old VW Backup file: \033[31m{old_path}\033[0m ({format_size(file_size)})")
             elif operation == 'delete_icon':
                 # Handle Icon file deletion
                 os.remove(old_path)
-                print(f"🗑️ Removed Mac Icon file: \033[31m{old_path}\033[0m")
+                total_space_saved += file_size
+                print(f"🗑️ Removed Mac Icon file: \033[31m{old_path}\033[0m ({format_size(file_size)})")
             elif operation == 'delete_lnk':
                 # Handle Windows shortcut deletion
                 os.remove(old_path)
-                print(f"🗑️ Removed Windows shortcut: \033[31m{old_path}\033[0m")
+                total_space_saved += file_size
+                print(f"🗑️ Removed Windows shortcut: \033[31m{old_path}\033[0m ({format_size(file_size)})")
             elif operation == 'delete_network_trash':
                 # Handle network trash file deletion
                 os.remove(old_path)
-                print(f"🗑️ Removed network trash file: \033[31m{old_path}\033[0m")
+                total_space_saved += file_size
+                print(f"🗑️ Removed network trash file: \033[31m{old_path}\033[0m ({format_size(file_size)})")
             elif is_rtfd:
                 # Special handling for RTFD bundles
                 if os.path.exists(new_path):
@@ -1052,6 +1093,10 @@ def process_files_and_folders(root_dir):
         except Exception as e:
             print(f"❌ Error processing {old_path}: {e}")
 
+    # Display space savings summary
+    if total_space_saved > 0:
+        print(f"\n💾 Total disk space freed: {format_size(total_space_saved)}")
+    
     print("\n🎉 Done! Check your files.")
 
 if __name__ == "__main__":
