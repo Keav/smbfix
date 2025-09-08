@@ -674,6 +674,63 @@ def check_file_removal(path, rename_list):
         return True
     return False
 
+def check_vw_backup_folder(path, rename_list):
+    """
+    Check if folder is exactly 'VW Backup' and handle cleanup based on file ages.
+    - If all files are older than 7 days, delete the entire folder
+    - If some files are newer than 7 days, delete only files older than 7 days
+    """
+    folder_name = os.path.basename(path)
+    
+    # Check if this is exactly a "VW Backup" folder
+    if folder_name != "VW Backup":
+        return False
+    
+    try:
+        print(f"🔍 Found Vectorworks backup folder: {path}")
+        
+        # Get all files in the VW Backup folder
+        files_in_folder = []
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    file_age_days = (time.time() - os.path.getmtime(file_path)) / 86400
+                    files_in_folder.append((file_path, file_age_days))
+                except OSError as e:
+                    print(f"⚠️ Could not check age of file {file_path}: {e}")
+                    continue
+        
+        if not files_in_folder:
+            # Empty folder, mark for deletion
+            print(f"📁 Empty VW Backup folder marked for removal: {path}")
+            rename_list.append((path, None, False, 'delete_vw_backup'))
+            return True
+        
+        # Check if all files are older than 7 days
+        all_files_old = all(age > 7 for _, age in files_in_folder)
+        
+        if all_files_old:
+            # All files are old, delete entire folder
+            print(f"📁 VW Backup folder with all old files (>7 days) marked for removal: {path}")
+            rename_list.append((path, None, False, 'delete_vw_backup'))
+            return True
+        else:
+            # Some files are newer, only delete old files
+            old_files = [file_path for file_path, age in files_in_folder if age > 7]
+            if old_files:
+                print(f"🗂️ Found {len(old_files)} old files in VW Backup folder: {path}")
+                for old_file in old_files:
+                    rename_list.append((old_file, None, False, 'delete_vw_backup_file'))
+            
+            # Also check if we should clean the folder name itself
+            new_folder_path = rename_if_needed(path, rename_list)
+            return len(old_files) > 0
+            
+    except Exception as e:
+        print(f"⚠️ Error processing VW Backup folder {path}: {e}")
+        return False
+
 # ------------------ MAIN PROCESSING ------------------ #
 
 def update_child_paths(rename_list, old_parent_path, new_parent_path):
@@ -713,6 +770,11 @@ def process_folder(folder, current_user, logged_in_user, rename_list):
 
     # Store the original path before any potential renaming for directory scanning
     original_folder = folder
+    
+    # Check for VW Backup folders first
+    vw_backup_processed = check_vw_backup_folder(folder, rename_list)
+    if vw_backup_processed and any(op in ['delete_vw_backup'] for _, _, _, op in rename_list if _ == folder):
+        return  # Don't process further since entire folder will be deleted
     
     # Add the folder to rename list if needed, but keep using original path for scanning
     new_folder = rename_if_needed(folder, rename_list)
@@ -844,6 +906,10 @@ def process_files_and_folders(root_dir):
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE ICON]\033[0m")
         elif operation == 'delete_lnk':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE SHORTCUT]\033[0m")
+        elif operation == 'delete_vw_backup':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE VW BACKUP FOLDER]\033[0m")
+        elif operation == 'delete_vw_backup_file':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE OLD VW BACKUP FILE]\033[0m")
         else:
             # Using colorful output and bold arrow for better visibility
             rtfd_marker = " [RTFD Bundle]" if is_rtfd else ""
@@ -882,6 +948,18 @@ def process_files_and_folders(root_dir):
                 else:
                     os.remove(old_path)
                     print(f"🗑️ Removed file: \033[31m{old_path}\033[0m")
+            elif operation == 'delete_vw_backup':
+                # Handle VW Backup folder deletion
+                if os.path.isdir(old_path):
+                    shutil.rmtree(old_path)
+                    print(f"🗑️ Removed VW Backup folder: \033[31m{old_path}\033[0m")
+                else:
+                    os.remove(old_path)
+                    print(f"🗑️ Removed VW Backup file: \033[31m{old_path}\033[0m")
+            elif operation == 'delete_vw_backup_file':
+                # Handle individual VW Backup file deletion
+                os.remove(old_path)
+                print(f"🗑️ Removed old VW Backup file: \033[31m{old_path}\033[0m")
             elif operation == 'delete_icon':
                 # Handle Icon file deletion
                 os.remove(old_path)
