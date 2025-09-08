@@ -638,7 +638,7 @@ def is_cleanup_file(path):
     """Check if a file matches cleanup criteria."""
     filename = os.path.basename(path)
     # Match specific extensions
-    if filename.lower().endswith(('.dmg', '.pkg', '.exe', '.msi', '.app')):
+    if filename.lower().endswith(('.dmg', '.pkg', '.exe', '.msi', '.app', '.lck')):
         return True
     # Match temporary working files with the pattern `.*.vwx` or `.*.dwg`
     if re.match(r"^\..*\.vwx$", filename, re.IGNORECASE) or re.match(r"^\..*\.dwg$", filename, re.IGNORECASE):
@@ -655,7 +655,11 @@ def should_delete_file(path):
             
         # Check file age
         file_age_days = (time.time() - os.path.getmtime(path)) / 86400
-        if file_age_days > 14 and (is_temp_file_or_folder(path) or is_cleanup_file(path)):
+        
+        # Special handling for .lck files (7 days) vs other cleanup files (14 days)
+        if path.lower().endswith('.lck') and file_age_days > 7:
+            return True
+        elif file_age_days > 14 and (is_temp_file_or_folder(path) or is_cleanup_file(path)):
             return True
     except Exception as e:
         print(f"⚠️ Error checking file age for {path}: {e}")
