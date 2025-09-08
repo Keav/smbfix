@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import base64
 import shutil
+import time
 
 # Define invalid SMB characters
 PROBLEM_CHAR_REGEX = re.compile(r"[\x00-\x1F\x7F\uE000-\uF8FF\u0300-\u036F]")
@@ -409,7 +410,7 @@ def clean_filename(entry):
 # ------------------ FILE & FOLDER CHECKS ------------------ #
 
 def should_exclude(path):
-    """Exclude iPhoto Library, .abbu files/folders, Synology system files, and mail archives."""
+    """Exclude specific files and folders from processing."""
     return ("iPhoto Library" in path or 
             ".abbu/" in path or 
             path.lower().endswith(".abbu") or 
@@ -419,7 +420,17 @@ def should_exclude(path):
             "@eaDir" in os.path.basename(path) or  # Exclude @eaDir folder name directly
             path.endswith("@SynoEAStream") or  # Exclude Synology extended attribute files
             ".mbox/" in path or  # Exclude mail archive contents
-            path.lower().endswith(".mbox"))  # Exclude mail archive files
+            path.lower().endswith(".mbox") or  # Exclude mail archive files
+            os.path.basename(path) in ["$RECYCLE.BIN", ".Spotlight-V100", ".fseventsd", ".localized"])  # Exclude specified folders/files
+
+def check_folder_removal(path, rename_list):
+    """Check if a folder matches cleanup criteria and add to removal list."""
+    folder_name = os.path.basename(path)
+    if folder_name in ["$RECYCLE.BIN", ".Spotlight-V100", ".fseventsd", ".localized"]:
+        print(f"🔍 Debug: Folder or file marked for removal: {path}")
+        rename_list.append((path, None, False, 'delete_folder'))
+        return True
+    return False
 
 def is_rtfd_bundle(path):
     """Check if the path is an RTFD bundle."""
@@ -558,11 +569,22 @@ def rename_if_needed(path, rename_list):
     return new_path
 
 def check_alias_removal(path, rename_list):
-    """Check if file is a Mac alias and add to removal list for Synology NAS."""
-    if IS_SYNOLOGY and is_mac_alias(path):
-        print(f"🔍 Debug: Mac alias detected for removal: {path}")
-        rename_list.append((path, None, False, 'delete'))  # None for new_path, delete operation
-        return True
+    """Check if file is a Mac alias and add to removal list."""
+    if is_mac_alias(path):
+        if IS_SYNOLOGY:
+            # On Synology, remove aliases as they're not useful
+            print(f"🔍 Debug: Mac alias detected for removal on Synology: {path}")
+            rename_list.append((path, None, False, 'delete'))
+            return True
+        elif IS_MACOS:
+            # On macOS, you might want to keep them or handle differently
+            # For now, let's also remove them for consistency
+            #print(f"🔍 Debug: Mac alias detected for removal on macOS: {path}")
+            #rename_list.append((path, None, False, 'delete'))
+            #return True
+        
+            # On macOS, just log that we found an alias but don't remove it
+            print(f"🔍 Debug: Mac alias found (keeping on macOS): {path}")
     return False
 
 def is_mac_icon_file(filepath):
@@ -596,6 +618,59 @@ def check_lnk_removal(path, rename_list):
     if path.lower().endswith('.lnk'):
         print(f"🔍 Debug: Windows shortcut detected for removal: {path}")
         rename_list.append((path, None, False, 'delete_lnk'))
+        return True
+    return False
+
+# ------------------ FILE CLEANUP FUNCTIONS ------------------ #
+
+def is_temp_file_or_folder(path):
+    """Check if a file or folder matches temporary file patterns."""
+    filename = os.path.basename(path)
+    # Match Microsoft Office temporary files
+    if filename.startswith("~$"):
+        return True
+    # Match Synology temporary folders
+    if filename.startswith(".sb-"):
+        return True
+    return False
+
+def is_cleanup_file(path):
+    """Check if a file matches cleanup criteria."""
+    filename = os.path.basename(path)
+    # Match specific extensions
+    if filename.lower().endswith(('.dmg', '.pkg', '.exe', '.msi', '.app')):
+        return True
+    # Match temporary working files with the pattern `.*.vwx` or `.*.dwg`
+    if re.match(r"^\..*\.vwx$", filename, re.IGNORECASE) or re.match(r"^\..*\.dwg$", filename, re.IGNORECASE):
+        return True
+    return False
+
+def should_delete_file(path):
+    """Determine if a file should be deleted based on age and type."""
+    try:
+        # Validate path parameter
+        if not path or path is None:
+            print(f"⚠️ Invalid path provided: {path}")
+            return False
+            
+        # Check file age
+        file_age_days = (time.time() - os.path.getmtime(path)) / 86400
+        if file_age_days > 14 and (is_temp_file_or_folder(path) or is_cleanup_file(path)):
+            return True
+    except Exception as e:
+        print(f"⚠️ Error checking file age for {path}: {e}")
+    return False
+
+def check_file_removal(path, rename_list):
+    """Check if a file matches cleanup criteria and add to removal list."""
+    # Validate path parameter
+    if not path or path is None:
+        print(f"⚠️ Invalid path provided to check_file_removal: {path}")
+        return False
+        
+    if should_delete_file(path) or os.path.basename(path) == ".localized":
+        print(f"🔍 Debug: File marked for removal: {path}")
+        rename_list.append((path, None, False, 'delete_cleanup'))
         return True
     return False
 
@@ -642,6 +717,11 @@ def process_folder(folder, current_user, logged_in_user, rename_list):
     # Add the folder to rename list if needed, but keep using original path for scanning
     new_folder = rename_if_needed(folder, rename_list)
 
+    # Check for cleanup folders
+    cleanup_marked_for_removal = check_folder_removal(folder, rename_list)
+    if cleanup_marked_for_removal:
+        return  # Don't process further since folder will be deleted
+
     try:
         # Use the original folder path for scanning, as the rename hasn't happened yet
         with os.scandir(original_folder) as entries:
@@ -657,9 +737,14 @@ def process_folder(folder, current_user, logged_in_user, rename_list):
         print(f"⚠️ Error processing {folder}: {e}")
 
 def process_file(file, current_user, logged_in_user, rename_list):
-    """Process a file: unlock (if locked), fix ownership, permissions, and rename."""
+    """Process a file: unlock (if locked), fix ownership, permissions, rename, or delete."""
     if should_exclude(file):
         return
+
+    # Check for cleanup files
+    cleanup_marked_for_removal = check_file_removal(file, rename_list)
+    if cleanup_marked_for_removal:
+        return  # Don't process further since file will be deleted
 
     # Check for Mac aliases on Synology NAS (add to list, don't remove immediately)
     alias_marked_for_removal = check_alias_removal(file, rename_list)
@@ -749,6 +834,10 @@ def process_files_and_folders(root_dir):
 
     print("\n⚠️ The following files/folders will be renamed or removed:\n")
     for old_path, new_path, is_rtfd, operation in rename_list:
+        if operation == 'delete_folder':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE FOLDER]\033[0m")
+        if operation == 'delete_cleanup':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE CLEANUP FILE]\033[0m")
         if operation == 'delete':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE ALIAS]\033[0m")
         elif operation == 'delete_icon':
@@ -777,6 +866,22 @@ def process_files_and_folders(root_dir):
                 # Handle alias deletion
                 os.remove(old_path)
                 print(f"🗑️ Removed Mac alias: \033[31m{old_path}\033[0m")
+            elif operation == 'delete_cleanup':
+                # Handle cleanup file deletion
+                if os.path.isdir(old_path):
+                    shutil.rmtree(old_path)
+                    print(f"🗑️ Removed cleanup folder: \033[31m{old_path}\033[0m")
+                else:
+                    os.remove(old_path)
+                    print(f"🗑️ Removed cleanup file: \033[31m{old_path}\033[0m")
+            elif operation == 'delete_folder':
+                # Handle folder deletion
+                if os.path.isdir(old_path):
+                    shutil.rmtree(old_path)
+                    print(f"🗑️ Removed folder: \033[31m{old_path}\033[0m")
+                else:
+                    os.remove(old_path)
+                    print(f"🗑️ Removed file: \033[31m{old_path}\033[0m")
             elif operation == 'delete_icon':
                 # Handle Icon file deletion
                 os.remove(old_path)
