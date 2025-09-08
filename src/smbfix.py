@@ -621,6 +621,27 @@ def check_lnk_removal(path, rename_list):
         return True
     return False
 
+def is_network_trash_file(path):
+    """Check if a file is a network share trash file (.afpDeleted* or .smbdelete*)."""
+    filename = os.path.basename(path)
+    return (filename.lower().startswith('.afpdeleted') or 
+            filename.lower().startswith('.smbdelete'))
+
+def check_network_trash_removal(path, rename_list):
+    """Check if file is a network trash file and add to removal list if older than 7 days."""
+    if is_network_trash_file(path):
+        try:
+            file_age_days = (time.time() - os.path.getmtime(path)) / 86400
+            if file_age_days > 7:
+                print(f"🔍 Debug: Network trash file (>{file_age_days:.1f} days old) detected for removal: {path}")
+                rename_list.append((path, None, False, 'delete_network_trash'))
+                return True
+            else:
+                print(f"🔍 Debug: Network trash file found but too recent ({file_age_days:.1f} days old), keeping: {path}")
+        except Exception as e:
+            print(f"⚠️ Error checking age of network trash file {path}: {e}")
+    return False
+
 # ------------------ FILE CLEANUP FUNCTIONS ------------------ #
 
 def is_temp_file_or_folder(path):
@@ -827,6 +848,11 @@ def process_file(file, current_user, logged_in_user, rename_list):
     if lnk_marked_for_removal:
         return  # Don't process further since file will be deleted
 
+    # Check for network trash files (add to list for removal if older than 7 days)
+    network_trash_marked_for_removal = check_network_trash_removal(file, rename_list)
+    if network_trash_marked_for_removal:
+        return  # Don't process further since file will be deleted
+
     if IS_MACOS:
         unlock_file(file, current_user, logged_in_user)
         fix_ownership(file, current_user)
@@ -910,6 +936,8 @@ def process_files_and_folders(root_dir):
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE ICON]\033[0m")
         elif operation == 'delete_lnk':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE SHORTCUT]\033[0m")
+        elif operation == 'delete_network_trash':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE NETWORK TRASH]\033[0m")
         elif operation == 'delete_vw_backup':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE VW BACKUP FOLDER]\033[0m")
         elif operation == 'delete_vw_backup_file':
@@ -972,6 +1000,10 @@ def process_files_and_folders(root_dir):
                 # Handle Windows shortcut deletion
                 os.remove(old_path)
                 print(f"🗑️ Removed Windows shortcut: \033[31m{old_path}\033[0m")
+            elif operation == 'delete_network_trash':
+                # Handle network trash file deletion
+                os.remove(old_path)
+                print(f"🗑️ Removed network trash file: \033[31m{old_path}\033[0m")
             elif is_rtfd:
                 # Special handling for RTFD bundles
                 if os.path.exists(new_path):
