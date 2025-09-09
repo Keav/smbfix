@@ -796,6 +796,54 @@ def check_vw_backup_folder(path, rename_list):
         print(f"⚠️ Error processing VW Backup folder {path}: {e}")
         return False
 
+def is_effectively_empty_folder(path):
+    """
+    Check if a folder is effectively empty (only contains @eaDir or other ignorable items).
+    Returns True if the folder should be considered empty for cleanup purposes.
+    """
+    try:
+        # Get all items in the folder
+        items = os.listdir(path)
+        
+        if not items:
+            return True  # Truly empty
+        
+        # Filter out items we consider "ignorable" for emptiness check
+        significant_items = []
+        for item in items:
+            item_path = os.path.join(path, item)
+            # Skip @eaDir folders and .DS_Store files
+            if item == '@eaDir' or item == '.DS_Store':
+                continue
+            # Skip other Synology metadata files
+            if item.endswith('@SynoEAStream'):
+                continue
+            # If we get here, this is a significant item
+            significant_items.append(item)
+        
+        # If no significant items remain, consider it effectively empty
+        return len(significant_items) == 0
+        
+    except Exception as e:
+        print(f"⚠️ Error checking if folder is effectively empty {path}: {e}")
+        return False
+
+def check_empty_folder_removal(path, rename_list):
+    """Check if a folder is effectively empty and mark it for removal."""
+    if is_effectively_empty_folder(path):
+        # Don't remove system folders or excluded paths
+        folder_name = os.path.basename(path)
+        if folder_name in ["@eaDir", "$RECYCLE.BIN", ".Spotlight-V100", ".fseventsd"]:
+            return False
+            
+        if should_exclude(path):
+            return False
+            
+        print(f"🔍 Debug: Effectively empty folder marked for removal: {path}")
+        rename_list.append((path, None, False, 'delete_empty_folder'))
+        return True
+    return False
+
 # ------------------ MAIN PROCESSING ------------------ #
 
 def update_child_paths(rename_list, old_parent_path, new_parent_path):
@@ -823,7 +871,7 @@ def update_child_paths(rename_list, old_parent_path, new_parent_path):
     if updated_count > 0:
         print(f"🔄 Updated {updated_count} child paths after renaming parent directory")
 
-def process_folder(folder, current_user, logged_in_user, rename_list):
+def process_folder(folder, current_user, logged_in_user, rename_list, remove_empty_folders=False):
     """Process a folder: unlock if necessary, fix ownership, permissions, and process its contents."""
     if should_exclude(folder):
         return
@@ -874,11 +922,16 @@ def process_folder(folder, current_user, logged_in_user, rename_list):
                 if should_exclude(path):
                     continue
                 if entry.is_dir():
-                    process_folder(path, current_user, logged_in_user, rename_list)
+                    process_folder(path, current_user, logged_in_user, rename_list, remove_empty_folders)
                 elif entry.is_file():
                     process_file(path, current_user, logged_in_user, rename_list)
     except Exception as e:
         print(f"⚠️ Error processing {folder}: {e}")
+
+    # After processing contents, check if this folder is now effectively empty
+    # Only check after processing children to ensure we've cleaned up everything possible first
+    if remove_empty_folders:
+        check_empty_folder_removal(original_folder, rename_list)
 
 def process_file(file, current_user, logged_in_user, rename_list):
     """Process a file: unlock (if locked), fix ownership, permissions, rename, or delete."""
@@ -922,7 +975,7 @@ def process_file(file, current_user, logged_in_user, rename_list):
 
     rename_if_needed(file, rename_list)
 
-def process_files_and_folders(root_dir):
+def process_files_and_folders(root_dir, remove_empty_folders=False):
     """Main function to process all files and folders, preview changes, and apply them in bulk."""
     global sudo_timestamp_refreshed, total_space_saved
     
@@ -969,7 +1022,7 @@ def process_files_and_folders(root_dir):
                     if should_exclude(path):
                         continue
                     if entry.is_dir():
-                        process_folder(path, current_user, logged_in_user, rename_list)
+                        process_folder(path, current_user, logged_in_user, rename_list, remove_empty_folders)
                     elif entry.is_file():
                         process_file(path, current_user, logged_in_user, rename_list)
         except Exception as e:
@@ -1005,6 +1058,8 @@ def process_files_and_folders(root_dir):
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE NETWORK TRASH]\033[0m")
         elif operation == 'delete_ds_store':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE .DS_STORE]\033[0m")
+        elif operation == 'delete_empty_folder':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE EMPTY FOLDER]\033[0m")
         elif operation == 'delete_app_bundle':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE APP BUNDLE]\033[0m")
         elif operation == 'delete_vw_backup':
@@ -1032,7 +1087,7 @@ def process_files_and_folders(root_dir):
             # Track file/folder size before deletion
             file_size = 0
             if operation in ['delete', 'delete_cleanup', 'delete_folder', 'delete_vw_backup', 
-                           'delete_vw_backup_file', 'delete_icon', 'delete_lnk', 'delete_network_trash', 'delete_ds_store', 'delete_app_bundle']:
+                           'delete_vw_backup_file', 'delete_icon', 'delete_lnk', 'delete_network_trash', 'delete_ds_store', 'delete_empty_folder', 'delete_app_bundle']:
 
                 try:
                     if os.path.isdir(old_path):
@@ -1106,6 +1161,11 @@ def process_files_and_folders(root_dir):
                 os.remove(old_path)
                 total_space_saved += file_size
                 print(f"🗑️ Removed .DS_Store file: \033[31m{old_path}\033[0m ({format_size(file_size)})")
+            elif operation == 'delete_empty_folder':
+                # Handle empty folder deletion
+                shutil.rmtree(old_path)
+                total_space_saved += file_size
+                print(f"🗑️ Removed empty folder: \033[31m{old_path}\033[0m ({format_size(file_size)})")
             elif operation == 'delete_app_bundle':
                 # Handle app bundle deletion
                 shutil.rmtree(old_path)
@@ -1179,6 +1239,22 @@ if __name__ == "__main__":
         else:
             print(f"⚠️ No stored credentials found for {current_user}")
         sys.exit(0)
-        
-    root_dir = sys.argv[1] if len(sys.argv) > 1 else '.'
-    process_files_and_folders(root_dir)
+    
+    # Parse command line arguments
+    remove_empty_folders = False
+    root_dir = '.'
+    
+    # Check for empty folder removal flag
+    if '-e' in sys.argv or '--empty-folders' in sys.argv:
+        remove_empty_folders = True
+        print("📁 Empty folder removal is ENABLED")
+    else:
+        print("📁 Empty folder removal is DISABLED (use -e or --empty-folders to enable)")
+    
+    # Get the root directory (skip flags)
+    for arg in sys.argv[1:]:
+        if arg not in ['-e', '--empty-folders', '--check-env', '--forget-credentials']:
+            root_dir = arg
+            break
+    
+    process_files_and_folders(root_dir, remove_empty_folders)
