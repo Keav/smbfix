@@ -662,7 +662,223 @@ def check_ds_store_removal(path, rename_list):
         return True
     return False
 
-# ...existing code...
+# ------------------ FILE CLEANUP FUNCTIONS ------------------ #
+
+def is_temp_file_or_folder(path):
+    """Check if a file or folder matches temporary file patterns."""
+    filename = os.path.basename(path)
+    # Match Microsoft Office temporary files
+    if filename.startswith("~$"):
+        return True
+    # Match Synology temporary folders
+    if filename.startswith(".sb-"):
+        return True
+    return False
+
+def is_cleanup_file(path):
+    """Check if a file matches cleanup criteria."""
+    filename = os.path.basename(path)
+    # Match specific extensions
+    if filename.lower().endswith(('.dmg', '.pkg', '.exe', '.msi', '.app', '.lck')):
+        return True
+    # Match temporary working files with the pattern `.*.vwx` or `.*.dwg`
+    if re.match(r"^\..*\.vwx$", filename, re.IGNORECASE) or re.match(r"^\..*\.dwg$", filename, re.IGNORECASE):
+        return True
+    return False
+
+def is_app_bundle(path):
+    """Check if a directory is a macOS application bundle (.app)."""
+    return path.lower().endswith('.app') and os.path.isdir(path)
+
+def should_delete_file(path):
+    """Determine if a file should be deleted based on age and type."""
+    try:
+        # Validate path parameter
+        if not path or path is None:
+            print(f"⚠️ Invalid path provided: {path}")
+            return False
+            
+        # Check file age
+        file_age_days = (time.time() - os.path.getmtime(path)) / 86400
+        
+        # Special handling for .lck files (7 days) vs other cleanup files (14 days)
+        if path.lower().endswith('.lck') and file_age_days > 7:
+            return True
+        elif file_age_days > 14 and (is_temp_file_or_folder(path) or is_cleanup_file(path)):
+            return True
+    except Exception as e:
+        print(f"⚠️ Error checking file age for {path}: {e}")
+    return False
+
+def should_delete_app_bundle(path):
+    """Determine if an app bundle should be deleted based on age."""
+    try:
+        if not is_app_bundle(path):
+            return False
+            
+        # Check bundle age
+        file_age_days = (time.time() - os.path.getmtime(path)) / 86400
+        
+        # Use same 14-day threshold as other cleanup files
+        if file_age_days > 14:
+            return True
+    except Exception as e:
+        print(f"⚠️ Error checking app bundle age for {path}: {e}")
+    return False
+
+def check_file_removal(path, rename_list):
+    """Check if a file matches cleanup criteria and add to removal list."""
+    # Validate path parameter
+    if not path or path is None:
+        print(f"⚠️ Invalid path provided to check_file_removal: {path}")
+        return False
+        
+    if should_delete_file(path) or os.path.basename(path) == ".localized":
+        print(f"🔍 Debug: File marked for removal: {path}")
+        rename_list.append((path, None, False, 'delete_cleanup'))
+        return True
+    return False
+
+def check_vw_backup_folder(path, rename_list):
+    """
+    Check if folder is exactly 'VW Backup' and handle cleanup based on file ages.
+    - If all files are older than 7 days, delete the entire folder
+    - If some files are newer than 7 days, delete only files older than 7 days
+    """
+    folder_name = os.path.basename(path)
+    
+    # Check if this is exactly a "VW Backup" folder
+    if folder_name != "VW Backup":
+        return False
+    
+    try:
+        print(f"🔍 Found Vectorworks backup folder: {path}")
+        
+        # Get all files in the VW Backup folder
+        files_in_folder = []
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    file_age_days = (time.time() - os.path.getmtime(file_path)) / 86400
+                    files_in_folder.append((file_path, file_age_days))
+                except OSError as e:
+                    print(f"⚠️ Could not check age of file {file_path}: {e}")
+                    continue
+        
+        if not files_in_folder:
+            # Empty folder, mark for deletion
+            print(f"📁 Empty VW Backup folder marked for removal: {path}")
+            rename_list.append((path, None, False, 'delete_vw_backup'))
+            return True
+        
+        # Check if all files are older than 7 days
+        all_files_old = all(age > 7 for _, age in files_in_folder)
+        
+        if all_files_old:
+            # All files are old, delete entire folder
+            print(f"📁 VW Backup folder with all old files (>7 days) marked for removal: {path}")
+            rename_list.append((path, None, False, 'delete_vw_backup'))
+            return True
+        else:
+            # Some files are newer, only delete old files
+            old_files = [file_path for file_path, age in files_in_folder if age > 7]
+            if old_files:
+                print(f"🗂️ Found {len(old_files)} old files in VW Backup folder: {path}")
+                for old_file in old_files:
+                    rename_list.append((old_file, None, False, 'delete_vw_backup_file'))
+            
+            # Also check if we should clean the folder name itself
+            new_folder_path = rename_if_needed(path, rename_list)
+            return len(old_files) > 0
+            
+    except Exception as e:
+        print(f"⚠️ Error processing VW Backup folder {path}: {e}")
+        return False
+
+# ------------------ MAIN PROCESSING ------------------ #
+
+def update_child_paths(rename_list, old_parent_path, new_parent_path):
+    """Update all child paths in the rename list when a parent directory is renamed."""
+    updated_count = 0
+    for i, (old_path, new_path, is_rtfd, operation) in enumerate(rename_list):
+        # Check if this path is a child of the renamed parent
+        if old_path.startswith(old_parent_path + os.sep):
+            # Calculate the relative path from the old parent
+            relative_path = old_path[len(old_parent_path + os.sep):]
+            # Create the new full path
+            updated_old_path = os.path.join(new_parent_path, relative_path)
+            
+            # Update the new_path as well by replacing the parent portion
+            if new_path and new_path.startswith(old_parent_path + os.sep):
+                new_relative_path = new_path[len(old_parent_path + os.sep):]
+                updated_new_path = os.path.join(new_parent_path, new_relative_path)
+            else:
+                updated_new_path = new_path
+            
+            # Update the entry in the list
+            rename_list[i] = (updated_old_path, updated_new_path, is_rtfd, operation)
+            updated_count += 1
+    
+    if updated_count > 0:
+        print(f"🔄 Updated {updated_count} child paths after renaming parent directory")
+
+def process_folder(folder, current_user, logged_in_user, rename_list):
+    """Process a folder: unlock if necessary, fix ownership, permissions, and process its contents."""
+    if should_exclude(folder):
+        return
+    
+    # Check if this folder is actually a macOS app bundle before other processing
+    if is_app_bundle(folder):
+        # Process as an app bundle (similar to file processing)
+        if should_delete_app_bundle(folder):
+            print(f"🔍 Debug: App bundle marked for removal: {folder}")
+            rename_list.append((folder, None, False, 'delete_app_bundle'))
+            return  # Don't process further since app bundle will be deleted
+        
+        # If not deleting, still check if we need to rename it
+        if IS_MACOS:
+            unlock_file(folder, current_user, logged_in_user)
+            fix_ownership(folder, current_user)
+            fix_permissions(folder)
+        
+        rename_if_needed(folder, rename_list)
+        return  # Don't traverse into app bundle contents
+    
+    if IS_MACOS:
+        unlock_file(folder, current_user, logged_in_user)
+        fix_ownership(folder, current_user)
+        fix_permissions(folder)
+
+    # Store the original path before any potential renaming for directory scanning
+    original_folder = folder
+    
+    # Check for VW Backup folders first
+    vw_backup_processed = check_vw_backup_folder(folder, rename_list)
+    if vw_backup_processed and any(op in ['delete_vw_backup'] for _, _, _, op in rename_list if _ == folder):
+        return  # Don't process further since entire folder will be deleted
+    
+    # Add the folder to rename list if needed, but keep using original path for scanning
+    new_folder = rename_if_needed(folder, rename_list)
+
+    # Check for cleanup folders
+    cleanup_marked_for_removal = check_folder_removal(folder, rename_list)
+    if cleanup_marked_for_removal:
+        return  # Don't process further since folder will be deleted
+
+    try:
+        # Use the original folder path for scanning, as the rename hasn't happened yet
+        with os.scandir(original_folder) as entries:
+            for entry in entries:
+                path = entry.path
+                if should_exclude(path):
+                    continue
+                if entry.is_dir():
+                    process_folder(path, current_user, logged_in_user, rename_list)
+                elif entry.is_file():
+                    process_file(path, current_user, logged_in_user, rename_list)
+    except Exception as e:
+        print(f"⚠️ Error processing {folder}: {e}")
 
 def process_file(file, current_user, logged_in_user, rename_list):
     """Process a file: unlock (if locked), fix ownership, permissions, rename, or delete."""
