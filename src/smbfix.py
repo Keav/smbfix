@@ -677,6 +677,10 @@ def is_cleanup_file(path):
         return True
     return False
 
+def is_app_bundle(path):
+    """Check if a directory is a macOS application bundle (.app)."""
+    return path.lower().endswith('.app') and os.path.isdir(path)
+
 def should_delete_file(path):
     """Determine if a file should be deleted based on age and type."""
     try:
@@ -697,75 +701,21 @@ def should_delete_file(path):
         print(f"⚠️ Error checking file age for {path}: {e}")
     return False
 
-def check_file_removal(path, rename_list):
-    """Check if a file matches cleanup criteria and add to removal list."""
-    # Validate path parameter
-    if not path or path is None:
-        print(f"⚠️ Invalid path provided to check_file_removal: {path}")
-        return False
-        
-    if should_delete_file(path) or os.path.basename(path) == ".localized":
-        print(f"🔍 Debug: File marked for removal: {path}")
-        rename_list.append((path, None, False, 'delete_cleanup'))
-        return True
-    return False
-
-def check_vw_backup_folder(path, rename_list):
-    """
-    Check if folder is exactly 'VW Backup' and handle cleanup based on file ages.
-    - If all files are older than 7 days, delete the entire folder
-    - If some files are newer than 7 days, delete only files older than 7 days
-    """
-    folder_name = os.path.basename(path)
-    
-    # Check if this is exactly a "VW Backup" folder
-    if folder_name != "VW Backup":
-        return False
-    
+def should_delete_app_bundle(path):
+    """Determine if an app bundle should be deleted based on age."""
     try:
-        print(f"🔍 Found Vectorworks backup folder: {path}")
-        
-        # Get all files in the VW Backup folder
-        files_in_folder = []
-        for root, dirs, files in os.walk(path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                try:
-                    file_age_days = (time.time() - os.path.getmtime(file_path)) / 86400
-                    files_in_folder.append((file_path, file_age_days))
-                except OSError as e:
-                    print(f"⚠️ Could not check age of file {file_path}: {e}")
-                    continue
-        
-        if not files_in_folder:
-            # Empty folder, mark for deletion
-            print(f"📁 Empty VW Backup folder marked for removal: {path}")
-            rename_list.append((path, None, False, 'delete_vw_backup'))
-            return True
-        
-        # Check if all files are older than 7 days
-        all_files_old = all(age > 7 for _, age in files_in_folder)
-        
-        if all_files_old:
-            # All files are old, delete entire folder
-            print(f"📁 VW Backup folder with all old files (>7 days) marked for removal: {path}")
-            rename_list.append((path, None, False, 'delete_vw_backup'))
-            return True
-        else:
-            # Some files are newer, only delete old files
-            old_files = [file_path for file_path, age in files_in_folder if age > 7]
-            if old_files:
-                print(f"🗂️ Found {len(old_files)} old files in VW Backup folder: {path}")
-                for old_file in old_files:
-                    rename_list.append((old_file, None, False, 'delete_vw_backup_file'))
+        if not is_app_bundle(path):
+            return False
             
-            # Also check if we should clean the folder name itself
-            new_folder_path = rename_if_needed(path, rename_list)
-            return len(old_files) > 0
-            
+        # Check bundle age
+        file_age_days = (time.time() - os.path.getmtime(path)) / 86400
+        
+        # Use same 14-day threshold as other cleanup files
+        if file_age_days > 14:
+            return True
     except Exception as e:
-        print(f"⚠️ Error processing VW Backup folder {path}: {e}")
-        return False
+        print(f"⚠️ Error checking app bundle age for {path}: {e}")
+    return False
 
 # ------------------ MAIN PROCESSING ------------------ #
 
@@ -798,6 +748,23 @@ def process_folder(folder, current_user, logged_in_user, rename_list):
     """Process a folder: unlock if necessary, fix ownership, permissions, and process its contents."""
     if should_exclude(folder):
         return
+    
+    # Check if this folder is actually a macOS app bundle before other processing
+    if is_app_bundle(folder):
+        # Process as an app bundle (similar to file processing)
+        if should_delete_app_bundle(folder):
+            print(f"🔍 Debug: App bundle marked for removal: {folder}")
+            rename_list.append((folder, None, False, 'delete_app_bundle'))
+            return  # Don't process further since app bundle will be deleted
+        
+        # If not deleting, still check if we need to rename it
+        if IS_MACOS:
+            unlock_file(folder, current_user, logged_in_user)
+            fix_ownership(folder, current_user)
+            fix_permissions(folder)
+        
+        rename_if_needed(folder, rename_list)
+        return  # Don't traverse into app bundle contents
     
     if IS_MACOS:
         unlock_file(folder, current_user, logged_in_user)
@@ -952,6 +919,8 @@ def process_files_and_folders(root_dir):
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE SHORTCUT]\033[0m")
         elif operation == 'delete_network_trash':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE NETWORK TRASH]\033[0m")
+        elif operation == 'delete_app_bundle':
+            print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE APP BUNDLE]\033[0m")
         elif operation == 'delete_vw_backup':
             print(f"  - \033[31m{old_path}\033[0m \033[1;36m==>\033[0m \033[91m[DELETE VW BACKUP FOLDER]\033[0m")
         elif operation == 'delete_vw_backup_file':
@@ -977,7 +946,7 @@ def process_files_and_folders(root_dir):
             # Track file/folder size before deletion
             file_size = 0
             if operation in ['delete', 'delete_cleanup', 'delete_folder', 'delete_vw_backup', 
-                           'delete_vw_backup_file', 'delete_icon', 'delete_lnk', 'delete_network_trash']:
+                           'delete_vw_backup_file', 'delete_icon', 'delete_lnk', 'delete_network_trash', 'delete_app_bundle']:
                 try:
                     if os.path.isdir(old_path):
                         # Calculate directory size recursively
@@ -1045,6 +1014,11 @@ def process_files_and_folders(root_dir):
                 os.remove(old_path)
                 total_space_saved += file_size
                 print(f"🗑️ Removed network trash file: \033[31m{old_path}\033[0m ({format_size(file_size)})")
+            elif operation == 'delete_app_bundle':
+                # Handle app bundle deletion
+                shutil.rmtree(old_path)
+                total_space_saved += file_size
+                print(f"🗑️ Removed app bundle: \033[31m{old_path}\033[0m ({format_size(file_size)})")
             elif is_rtfd:
                 # Special handling for RTFD bundles
                 if os.path.exists(new_path):
